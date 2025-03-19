@@ -8,25 +8,24 @@ RT_NAMESPACE = "umqtt_core"
 
 
 class uMQTTCore(SSACore):
-    def __init__(
-        self, config_dir, config_open_mode="r", serializer: Serializer = json
-    ):
+    def __init__(self, config_dir, fopen_mode="r", serializer: Serializer = json):
         self._config_dir = config_dir
-        self._config_open_mode = config_open_mode
+        self._fopen_mode = fopen_mode
         self._serializer = serializer
 
         self._tasks = {}
         self._actions = {}
         self._properties = {}
 
-        self._builtin_actions = const({
+        self._builtin_actions = const(
+            {
                 "vfs/list": self._builtin_action_vfs_list,
                 "vfs/read": self._builtin_action_vfs_read,
                 "vfs/write": self._builtin_action_vfs_write,
                 "vfs/delete": self._builtin_action_vfs_delete,
                 "reload": self._builtin_action_reload_core,
-                })
-
+            }
+        )
 
     def _load_config(self):
         """
@@ -37,7 +36,7 @@ class uMQTTCore(SSACore):
         from ._config import load_configuration
 
         self.config = load_configuration(
-            self._config_dir, self._config_open_mode, self._serializer
+            self._config_dir, self._fopen_mode, self._serializer
         )
 
         self.id = self.config.get("id")
@@ -58,7 +57,7 @@ class uMQTTCore(SSACore):
         from ._config import write_configuration
 
         write_configuration(
-            self.config, self._config_dir, self._config_open_mode, self._serializer
+            self.config, self._config_dir, self._fopen_mode, self._serializer
         )
 
     def _connect(self):
@@ -139,7 +138,7 @@ class uMQTTCore(SSACore):
 
         self._mqtt.set_callback(on_registration)
         self._mqtt.subscribe(f"ssa/{self.id}/{registration}/ack")
-        self._mqtt.wait_msg() # Blocking wait for registration ack
+        self._mqtt.wait_msg()  # Blocking wait for registration ack
 
     def SSACoreEntry(*args, **kwargs):
         """
@@ -159,6 +158,128 @@ class uMQTTCore(SSACore):
 
         return main_decorator
 
+    ## AFFORDANCE HANDLER INTERFACE ##
+
+    def create_property(self, property_name, initial_value, **_):
+        """
+        Interface: AffordanceHandler
+
+        Create a new property with the specified name and initial value.
+        """
+        if property_name in self._properties:
+            raise ValueError(
+                f"Property {property_name} already exists. Set a new value using 'set_property' method."
+            )
+
+        # TODO: sanitize property names
+
+        self._properties[property_name] = initial_value
+
+    def get_property(self, property_name, **_):
+        """
+        Interface: AffordanceHandler
+
+        Get the value of a property by name.
+        """
+        if property_name not in self._properties:
+            raise ValueError(
+                f"Property {property_name} does not exist. Create it using 'create_property' method."
+            )
+
+        return self._properties[property_name]
+
+    def set_property(self, property_name, value, retain=True, qos=0, **_):
+        """
+        Interface: AffordanceHandler
+
+        Set the value of a property.
+        """
+        if property_name not in self._properties:
+            raise ValueError(
+                f"Property {property_name} does not exist. Create it using 'create_property' method."
+            )
+
+        self._properties[property_name] = value
+
+        try:
+            namespace = self.config["tm"]["name"]
+            topic = f"{self._base_property_topic}/{namespace}/{property_name}"
+            payload = self._serializer.dumps(value)
+            self._mqtt.publish(topic, payload, retain=retain, qos=qos)
+        except Exception as e:
+            # TODO: publish the error
+            raise ValueError(f"Failed to set property {property_name}: {e}") from e
+
+    def emit_event(self, event_name, event_data, retain=False, qos=0**_):
+        """
+        Interface: AffordanceHandler
+
+        Emit an event with the specified name and data.
+        """
+        # TODO: sanitize event names
+        namespace = self.config["tm"]["name"]
+        topic = f"{self._base_event_topic}/{namespace}/{event_name}"
+        payload = self._serializer.dumps(event_data)
+        self._mqtt.publish(topic, payload, retain=retain, qos=qos)
+
+    def sync_action(func):
+        """
+        Interface: AffordanceHandler
+
+        Decorator for synchronous action handlers.
+        """
+
+        # Wrap the function in an async wrapper
+        # So it can be executed as a coroutine
+        async def wrapper(self, *args, **kwargs):
+            return func(self, *args, **kwargs)
+
+        # Copy the function name to allow for proper error messages
+        wrapper.__name__ = func.__name__
+        return wrapper
+
+    def async_action(func):
+        """
+        Interface: AffordanceHandler
+
+        Decorator for asynchronous action handlers.
+        """
+
+        async def wrapper(self, *args, **kwargs):
+            return await func(self, *args, **kwargs)
+
+        # Copy the function name to allow for proper error messages
+        wrapper.__name__ = func.__name__
+        return wrapper
+
+    def register_action_handler(self, action_name, action_func, qos=0, **_):
+        """
+        Interface: AffordanceHandler
+
+        Register a new action handler.
+        """
+        if action_name in self._actions:
+            raise ValueError(f"Action {action_name} already exists.")
+        self._actions[action_name] = action_func  # TODO: support uri variables
+
+        namespace = self.config["tm"]["name"]
+        self._mqtt.subscribe(
+            f"{self._base_action_topic}/{namespace}/{action_name}", qos=qos
+        )
+
+    def _invoke_action(self, action_name, action_input, **_):
+        """
+        Interface: AffordanceHandler
+
+        Invoke an action with the specified input.
+        """
+        if action_name not in self._actions:
+            raise ValueError(f"Action {action_name} does not exist.")
+
+        return self._actions[action_name]
+
+        self.create_task(action_handler(action_input))
+
     def _wrapp_builtin_action(action_func):
         def builtin_action_wrapper(self, action_input):
             try:
@@ -174,128 +295,115 @@ class uMQTTCore(SSACore):
     @_wrapp_builtin_action
     def _builtin_action_vfs_read(self, action_input):
         """
-        Interface: SSACore
+        Interface: AffordanceHandler
         Read the contents of a file from the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_read()")
 
     @_wrapp_builtin_action
     def _builtin_action_vfs_write(self, action_input):
         """
-        Interface: SSACore
+        Interface: AffordanceHandler
         Write data to a file in the virtual file system."""
-        raise NotImplementedError("Subclasses must implement builtin_action_vfs_write()")
+        raise NotImplementedError(
+            "Subclasses must implement builtin_action_vfs_write()"
+        )
 
     @_wrapp_builtin_action
     def _builtin_action_vfs_list(self, action_input):
         """
-        Interface: SSACore
+        Interface: AffordanceHandler
         List the contents of the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_list()")
 
     @_wrapp_builtin_action
     def _builtin_action_vfs_delete(self, action_input):
         """
-        Interface: SSACore
+        Interface: AffordanceHandler
         Delete a file from the virtual file system."""
-        raise NotImplementedError("Subclasses must implement builtin_action_vfs_delete()")
+        raise NotImplementedError(
+            "Subclasses must implement builtin_action_vfs_delete()"
+        )
 
     def _builtin_action_reload_core(self, _):
         """
-        Interface: SSACore
+        Interface: AffordanceHandler
         Reload the core module."""
-        raise NotImplementedError("Subclasses must implement builtin_action_reload_core()")
+        raise NotImplementedError(
+            "Subclasses must implement builtin_action_reload_core()"
+        )
 
-    ## AFFORDANCE HANDLER INTERFACE ##
+    ## TASK SCHEDULER INTERFACE ##
 
-    def create_property(self, property_name, initial_value, **_):
+    def _start_scheduler(self, main_task):
         """
-        Interface: AffordanceHandler
+        Interface: TaskScheduler
 
-        Create a new property with the specified name and initial value.
+        Launch the runtime and start running all registered tasks.
         """
-        if property_name in self._properties:
-            raise ValueError(f"Property {property_name} already exists. Set a new value using 'set_property' method.")
 
-        #TODO: sanitize property names
+        def task_exception_handler(loop, context):
+            
 
-        self._properties[property_name] = initial_value
+        loop = asyncio.new_event_loop()
 
-    def get_property(self, property_name, **_):
+        loop.set_exception_handler(self._exception_handler)
+
+
+        asyncio.run(main_task)
+
+    def task_create(self, task_id, task_func):
         """
-        Interface: AffordanceHandler
+        Register a task for execution.
 
-        Get the value of a property by name.
+        Associates a unique task identifier with a callable that encapsulates the task's logic.
+        Subclasses must override this method to provide the actual task scheduling or execution
+        mechanism.
+
+        Args:
+            task_id: A unique identifier for the task.
+            task_func: A callable implementing the task's functionality.
+
+        Raises:
+            NotImplementedError: Always, as this method must be implemented by subclasses.
         """
-        if property_name not in self._properties:
-            raise ValueError(f"Property {property_name} does not exist. Create it using 'create_property' method.")
 
-        return self._properties[property_name]
+    def task_cancel(self, task_id):
+        """Cancel a registered task.
 
-    def set_property(self, property_name, value, retain=True, qos=0, **_):
+        Cancel the task identified by the given task_id. This method serves as a stub and must be overridden by subclasses to implement task cancellation. Calling this method directly will raise a NotImplementedError.
+
+        Args:
+            task_id: The identifier of the task to cancel.
         """
-        Interface: AffordanceHandler
+        raise NotImplementedError("Subclasses must implement rt_task_cancel()")
 
-        Set the value of a property.
+    async def task_sleep_s(self, s):
+        """Asynchronously sleep for the specified number of seconds.
+
+        This abstract method must be implemented by subclasses to pause
+        execution asynchronously for the given duration.
+
+        Args:
+            s (int | float): The sleep duration in seconds.
+
+        Raises:
+            NotImplementedError: If the method is not implemented by a subclass.
         """
-        if property_name not in self._properties:
-            raise ValueError(f"Property {property_name} does not exist. Create it using 'create_property' method.")
+        raise NotImplementedError("Subclasses must implement rt_task_sleep_s()")
 
-        self._properties[property_name] = value
-
-        try: 
-            namespace = self.config["tm"]["name"]
-            topic = f"{self._base_property_topic}/{namespace}/{property_name}"
-            payload = self._serializer.dumps(value)
-            self._mqtt.publish(topic, payload, retain=retain, qos=qos)
-        except Exception as e:
-            #TODO: publish the error
-            raise ValueError(f"Failed to set property {property_name}: {e}") from e
-
-    def emit_event(self, event_name, event_data, retain=False, qos=0 **_):
+    async def task_sleep_ms(self, ms):
         """
-        Interface: AffordanceHandler
+        Asynchronously pause execution for a specified number of milliseconds.
 
-        Emit an event with the specified name and data.
+        This coroutine should suspend execution for the provided duration. Subclasses
+        must override this method to implement the actual sleep behavior.
+
+        Args:
+            ms: Duration to sleep in milliseconds.
+
+        Raises:
+            NotImplementedError: If the method is not overridden by a subclass.
         """
-        #TODO: sanitize event names
-        namespace = self.config["tm"]["name"]
-        topic = f"{self._base_event_topic}/{namespace}/{event_name}"
-        payload = self._serializer.dumps(event_data)
-        self._mqtt.publish(topic, payload, retain=retain, qos=qos)
-
-    def register_action_handler(self, action_name, action_func, qos=0, **_):
-        """
-        Interface: AffordanceHandler
-
-        Register a new action handler.
-        """
-        if action_name in self._actions:
-            raise ValueError(f"Action {action_name} already exists.")
-        self._actions[action_name] = action_func #TODO: support uri variables
-        
-        namespace = self.config["tm"]["name"]
-        self._mqtt.subscribe(f"{self._base_action_topic}/{namespace}/{action_name}", qos=qos)
-
-    def _get_action_handler(self, action_name, **_):
-        """
-        Interface: AffordanceHandler
-
-        Get the callback function for an action.
-        """
-        if action_name not in self._actions:
-            raise ValueError(f"Action {action_name} does not exist.")
-
-        return self._actions[action_name]
-
-    def _invoke_action(self, action_name, action_input, **_):
-        """
-        Interface: AffordanceHandler
-
-        Invoke an action with the specified input.
-        """
-        action_handler = self._get_action_handler(action_name)
-        self.create_task(action_handler(action_input))
-
-
+        raise NotImplementedError("Subclasses must implement rt_task_sleep_ms()")
 
 
