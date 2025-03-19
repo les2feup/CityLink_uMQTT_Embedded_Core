@@ -1,7 +1,7 @@
 from umqtt.simple import MQTTClient
 
 
-def mqtt_setup(client_id, rt_namespace, on_message):
+def mqtt_setup(client_id, rt_namespace, mqtt_client, on_message):
 
     base_topic = f"ssa/{client_id}"
     base_event_topic = f"{base_topic}/events"

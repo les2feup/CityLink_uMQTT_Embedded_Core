@@ -39,13 +39,6 @@ class uMQTTCore(SSACore):
             self._config_dir, self._fopen_mode, self._serializer
         )
 
-        self.id = self.config.get("id")
-        if self.id is None:
-            from machine import unique_id
-            from binascii import hexlify
-
-            self.id = hexlify(unique_id()).decode("utf-8")
-
     def _write_config(self, update_dict):
         """
         Interface: SSACore
@@ -93,10 +86,13 @@ class uMQTTCore(SSACore):
         """
         Interface: SSACore
 
-        Disconnect from the network.
+        Disconnect from the network. And exit the runtime.
         """
+
         self._mqtt.disconnect()
         self._wlan.disconnect()
+
+        asyncio.current_task().cancel()
 
     def _listen(self, blocking):
         """
@@ -120,6 +116,15 @@ class uMQTTCore(SSACore):
 
         Subclasses must override this method to implement the device registration logic.
         """
+        self.id = self.config.get("id")
+        if self.id is not None:
+            return
+
+        from machine import unique_id
+        from binascii import hexlify
+
+        self.id = hexlify(unique_id()).decode("utf-8")
+
         registration_payload = self._serializer.dumps(self.config["tm"])
         self._mqtt.publish(f"ssa/{self.id}/registration", registration_payload)
 
@@ -140,19 +145,47 @@ class uMQTTCore(SSACore):
         self._mqtt.subscribe(f"ssa/{self.id}/{registration}/ack")
         self._mqtt.wait_msg()  # Blocking wait for registration ack
 
-    def SSACoreEntry(*args, **kwargs):
+    def _setup_mqtt(self):
+        from ._setup import mqtt_setup
+
+        def on_message(topic, payload):
+            topic = topic.decode("utf-8")
+            if not topic.startswith(f"{self._base_action_topic}/"):
+                return
+
+            topic = topic[len(f"{self._base_action_topic}/") :]
+
+            namespace, action_name = topic.split("/", 1)
+            action_input = self._serializer.loads(payload)
+
+            self._invoke_action(namespace, action_name, action_input)
+
+        self._base_event_topic, self._base_action_topic, self._base_property_topic = mqtt_setup(
+            self.id, RT_NAMESPACE, self._mqtt, on_message
+        )
+
+    def SSACoreEntry(config_dir="./config", **kwargs):
         """
         Interface: SSACore
 
         Decorator to mark the entry point for the SSACore.
         """
 
+        core = uMQTTCore(config_dir, **kwargs)
+        core._load_config()
+
         def main_decorator(main_func):
             """Decorates the main function of the SSACore."""
 
-            def main_wrapper(self):
-                """Wrapper for the main function of the SSACore."""
-                raise NotImplementedError("Subclasses must implement SSACoreEntry()")
+            def main_wrapper():
+                """Wrapper for the main function of the SSACore."""kj
+                core._connect()
+                core._register_device()
+                core._setup_mqtt()
+
+                from ._setup import mqtt_setup
+
+                uMQTTCore._start_scheduler()
 
             return main_wrapper
 
@@ -260,46 +293,46 @@ class uMQTTCore(SSACore):
         """
         if action_name in self._actions:
             raise ValueError(f"Action {action_name} already exists.")
-        self._actions[action_name] = action_func  # TODO: support uri variables
+
+        #TODO: sanitize action names
+        self._actions[action_name] = action_func
 
         namespace = self.config["tm"]["name"]
         self._mqtt.subscribe(
             f"{self._base_action_topic}/{namespace}/{action_name}", qos=qos
         )
 
-    def _invoke_action(self, action_name, action_input, **_):
+    def _invoke_action(self, namespace, action_name, action_input, **_):
         """
         Interface: AffordanceHandler
 
         Invoke an action with the specified input.
         """
-        if action_name not in self._actions:
-            raise ValueError(f"Action {action_name} does not exist.")
 
-        return self._actions[action_name]
+        if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
+            self.create_task(self._builtin_actions[action_name](action_input))
 
-        self.create_task(action_handler(action_input))
+        elif namespace == self.config["tm"]["name"] and action_name in self._actions:
+            self.create_task(self._actions[action_name](action_input))
 
-    def _wrapp_builtin_action(action_func):
-        def builtin_action_wrapper(self, action_input):
-            try:
-                action_result = action_func(self, action_input)
-                action_result = self._serializer.dumps(action_result)
-                self._mqtt.publish(f"{self._base_action_topic}/", action_result)
-            except Exception as e:
-                # TODO: Change this to comply with the SSA spec
-                self._mqtt.publish(f"ssa/{self.id}/error", str(e))
+        raise ValueError(f"Action handler for {namespace}/{action_name} does not exist.")
+
+    def _wrap_builtin_action(action_func):
+        async def builtin_action_wrapper(self, action_input):
+            action_result = action_func(self, action_input)
+            action_result = self._serializer.dumps(action_result)
+            self._mqtt.publish(f"{self._base_action_topic}/", action_result)
 
         return builtin_action_wrapper
 
-    @_wrapp_builtin_action
+    @_wrap_builtin_action
     def _builtin_action_vfs_read(self, action_input):
         """
         Interface: AffordanceHandler
         Read the contents of a file from the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_read()")
 
-    @_wrapp_builtin_action
+    @_wrap_builtin_action
     def _builtin_action_vfs_write(self, action_input):
         """
         Interface: AffordanceHandler
@@ -308,14 +341,14 @@ class uMQTTCore(SSACore):
             "Subclasses must implement builtin_action_vfs_write()"
         )
 
-    @_wrapp_builtin_action
+    @_wrap_builtin_action
     def _builtin_action_vfs_list(self, action_input):
         """
         Interface: AffordanceHandler
         List the contents of the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_list()")
 
-    @_wrapp_builtin_action
+    @_wrap_builtin_action
     def _builtin_action_vfs_delete(self, action_input):
         """
         Interface: AffordanceHandler
@@ -328,9 +361,10 @@ class uMQTTCore(SSACore):
         """
         Interface: AffordanceHandler
         Reload the core module."""
-        raise NotImplementedError(
-            "Subclasses must implement builtin_action_reload_core()"
-        )
+        self._disconnect()
+
+        from machine import soft_reset
+        soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
 
@@ -342,12 +376,25 @@ class uMQTTCore(SSACore):
         """
 
         def task_exception_handler(loop, context):
-            
+            """Handle exceptions raised in tasks."""
+            future = context.get("future")
+            msg = context.get("exception", context["message"])
 
+            #TODO: (try to) publish the error as an event
+            if isinstance(msg, asyncio.CancelledError):
+                print(f"Task {future} was cancelled.")
+            elif:
+                isinstance(msg, Exception):
+                print(f"Generic exception in task {future}: {msg}")
+            else:
+                print(f"Unknown exception in task {future}: {msg}")
+
+            for id, task in self._tasks:
+                if task.done():
+                    del self._tasks[id]
+                
         loop = asyncio.new_event_loop()
-
         loop.set_exception_handler(self._exception_handler)
-
 
         asyncio.run(main_task)
 
@@ -362,10 +409,23 @@ class uMQTTCore(SSACore):
         Args:
             task_id: A unique identifier for the task.
             task_func: A callable implementing the task's functionality.
-
-        Raises:
-            NotImplementedError: Always, as this method must be implemented by subclasses.
         """
+        if task_id in self._tasks:
+            raise ValueError(f"Task {task_id} already exists.")
+
+        def task_wrapper():
+            try:
+                await task_func()
+            except asyncio.CancelledError:
+                print(f"Task {task_id} was cancelled.")
+            except Exception as e:
+                print(f"Error in task {task_id}: {e}")
+                #TODO: log the error
+            finally:
+                del self._tasks[task_id]
+
+        self._tasks[task_id] = asyncio.create_task(task_func())
+
 
     def task_cancel(self, task_id):
         """Cancel a registered task.
@@ -375,7 +435,10 @@ class uMQTTCore(SSACore):
         Args:
             task_id: The identifier of the task to cancel.
         """
-        raise NotImplementedError("Subclasses must implement rt_task_cancel()")
+        if task_id not in self._tasks:
+            raise ValueError(f"Task {task_id} does not exist.")
+
+        self._tasks[task_id].cancel()
 
     async def task_sleep_s(self, s):
         """Asynchronously sleep for the specified number of seconds.
@@ -385,11 +448,8 @@ class uMQTTCore(SSACore):
 
         Args:
             s (int | float): The sleep duration in seconds.
-
-        Raises:
-            NotImplementedError: If the method is not implemented by a subclass.
         """
-        raise NotImplementedError("Subclasses must implement rt_task_sleep_s()")
+        await asyncio.sleep(s)
 
     async def task_sleep_ms(self, ms):
         """
@@ -400,10 +460,7 @@ class uMQTTCore(SSACore):
 
         Args:
             ms: Duration to sleep in milliseconds.
-
-        Raises:
-            NotImplementedError: If the method is not overridden by a subclass.
         """
-        raise NotImplementedError("Subclasses must implement rt_task_sleep_ms()")
+        await asyncio.sleep_ms(ms)
 
 
