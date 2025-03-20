@@ -118,7 +118,7 @@ class uMQTTCore(SSACore):
         """
         self.id = self.config.get("id")
         if self.id is not None:
-            return
+            return  # already registered
 
         from machine import unique_id
         from binascii import hexlify
@@ -160,8 +160,8 @@ class uMQTTCore(SSACore):
 
             self._invoke_action(namespace, action_name, action_input)
 
-        self._base_event_topic, self._base_action_topic, self._base_property_topic = mqtt_setup(
-            self.id, RT_NAMESPACE, self._mqtt, on_message
+        self._base_event_topic, self._base_action_topic, self._base_property_topic = (
+            mqtt_setup(self.id, RT_NAMESPACE, self._mqtt, on_message)
         )
 
     def SSACoreEntry(config_dir="./config", **kwargs):
@@ -299,7 +299,7 @@ class uMQTTCore(SSACore):
         if action_name in self._actions:
             raise ValueError(f"Action {action_name} already exists.")
 
-        #TODO: sanitize action names
+        # TODO: sanitize action names
         self._actions[action_name] = action_func
 
         namespace = self.config["tm"]["name"]
@@ -315,27 +315,34 @@ class uMQTTCore(SSACore):
         """
 
         if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
-            self.task_create(action_name, self._builtin_actions[action_name](action_input))
+            self.task_create(
+                action_name, self._builtin_actions[action_name](action_input)
+            )
 
         elif namespace == self.config["tm"]["name"] and action_name in self._actions:
             self.task_create(action_name, self._actions[action_name](action_input))
 
-        raise ValueError(f"Action handler for {namespace}/{action_name} does not exist.")
+        raise ValueError(
+            f"Action handler for {namespace}/{action_name} does not exist."
+        )
 
     def _wrap_builtin_action(action_func):
         async def builtin_action_wrapper(self, action_input):
             action_result = action_func(self, action_input)
 
             from time import gmtime, mktime
-            action_result.update({
-                "timestamp":{
-                    "epoch_year": gmtime()[0],
-                    "seconds": mktime(gmtime())
-                    }
-                })
+
+            action_result.update(
+                {"timestamp": {"epoch_year": gmtime()[0], "seconds": mktime(gmtime())}}
+            )
 
             action_result = self._serializer.dumps(action_result)
-            self._mqtt.publish(f"{self._base_event_topic}/{RT_NAMESPACE}/vfs/report", action_result, retain=False, qos=1)
+            self._mqtt.publish(
+                f"{self._base_event_topic}/{RT_NAMESPACE}/vfs/report",
+                action_result,
+                retain=False,
+                qos=1,
+            )
 
         return builtin_action_wrapper
 
@@ -370,12 +377,13 @@ class uMQTTCore(SSACore):
             append = action_input.get("append", False)
 
             from ._builtins import vfs_write
+
             vfs_write(file_path, append, data, data_hash, data_hash_algo)
 
             return {"action": "write", "error": False, "message": file_path}
         except Exception as e:
             return {"action": "write", "error": True, "message": str(e)}
-        
+
     @_wrap_builtin_action
     def _builtin_action_vfs_list(self, action_input):
         """
@@ -399,6 +407,7 @@ class uMQTTCore(SSACore):
         self._disconnect()
 
         from machine import soft_reset
+
         soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
@@ -415,11 +424,10 @@ class uMQTTCore(SSACore):
             future = context.get("future")
             msg = context.get("exception", context["message"])
 
-            #TODO: (try to) publish the error as an event
+            # TODO: (try to) publish the error as an event
             if isinstance(msg, asyncio.CancelledError):
                 print(f"Task {future} was cancelled.")
-            elif:
-                isinstance(msg, Exception):
+            elif isinstance(msg, Exception):
                 print(f"Generic exception in task {future}: {msg}")
             else:
                 print(f"Unknown exception in task {future}: {msg}")
@@ -427,7 +435,7 @@ class uMQTTCore(SSACore):
             for id, task in self._tasks:
                 if task.done():
                     del self._tasks[id]
-                
+
         loop = asyncio.new_event_loop()
         loop.set_exception_handler(self._exception_handler)
 
@@ -455,12 +463,11 @@ class uMQTTCore(SSACore):
                 print(f"Task {task_id} was cancelled.")
             except Exception as e:
                 print(f"Error in task {task_id}: {e}")
-                #TODO: log the error
+                # TODO: log the error
             finally:
                 del self._tasks[task_id]
 
         self._tasks[task_id] = asyncio.create_task(task_func())
-
 
     def task_cancel(self, task_id):
         """Cancel a registered task.

@@ -5,11 +5,10 @@ The priority of the sensor is set by the user and can be "low", "medium", or "hi
 Setting the priority is handled by the user through the SSA HAL API (topic is mqtt://{...}/actions/ssa_hal/set/priority)
 """
 
-import random
-from ssa.core import ssa_main, SSA
+from ssa_core import SSACore
 
 
-async def simulate_random_sensor(ssa: SSA) -> None:
+async def simulate_random_sensor(ssa: SSACore) -> None:
     """
     Simulate a sensor reading and trigger a corresponding event.
 
@@ -17,15 +16,19 @@ async def simulate_random_sensor(ssa: SSA) -> None:
     It retrieves the current priority level from the SSA properties and triggers an event on the topic
     formatted as 'sensor_value/<priority>_prio', where <priority> may be 'low', 'medium', or 'high'.
     """
-    sensor_value = random.randint(0, 100)
-    priority = ssa.get_property("priority")
-    await ssa.emit_event(
-        f"sensor_value/{priority}_prio", sensor_value
-    )  # "low_prio", "medium_prio", "high_prio"
+    from random import randint
+
+    while True:
+        sensor_value = randint(0, 100)
+        priority = ssa.get_property("priority")
+        ssa.emit_event(
+            f"sensor_value/{priority}_prio", sensor_value
+        )  # "low_prio", "medium_prio", "high_prio"
+        await ssa.task_sleep_s(1)
 
 
-@ssa_main()
-def main(ssa: SSA):
+@SSACore.SSACoreEntry()
+def main(ssa: SSACore):
     """
     Initializes the sensor simulation application.
 
@@ -34,4 +37,4 @@ def main(ssa: SSA):
     "low", "medium", and "high".
     """
     ssa.create_property("priority", "low")  # "low", "medium", "high"
-    ssa.rt_task_create("sensor_sim", simulate_random_sensor, 1000)  # 1 Hz
+    ssa.task_create("sensor_sim", simulate_random_sensor)
