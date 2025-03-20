@@ -23,7 +23,7 @@ def _check_template(template, provided, path="config"):
             raise ValueError(f"Missing required key: {path}['{key}']")
 
         if isinstance(expected_type, dict):
-            validate_configuration(expected_type, provided[key], f"{path}['{key}']")
+            _check_template(expected_type, provided[key], f"{path}['{key}']")
 
         elif not isinstance(provided[key], expected_type):
             raise TypeError(
@@ -47,8 +47,7 @@ def _validate_configuration(config):
         },
         "runtime": {
             "broker": {
-                "client_id": str,
-                "ipv4": str,
+                "hostname": str,
             },
             "connection": {
                 "retries": int,
@@ -78,7 +77,7 @@ def load_configuration(config_dir, config_open_mode, serializer):
     if root_dir != os.getcwd():
         os.chdir(root_dir)
 
-    validate_configuration(config)
+    _validate_configuration(config)
 
     return config
 

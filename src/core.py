@@ -35,7 +35,7 @@ class uMQTTCore(SSACore):
         """
         from ._config import load_configuration
 
-        self.config = load_configuration(
+        self._config = load_configuration(
             self._config_dir, self._fopen_mode, self._serializer
         )
 
@@ -45,12 +45,12 @@ class uMQTTCore(SSACore):
 
         Write the configuration to the specified directory.
         """
-        self.config.update(update_dict)
+        self._config.update(update_dict)
 
         from ._config import write_configuration
 
         write_configuration(
-            self.config, self._config_dir, self._fopen_mode, self._serializer
+            self._config, self._config_dir, self._fopen_mode, self._serializer
         )
 
     def _connect(self):
@@ -60,14 +60,14 @@ class uMQTTCore(SSACore):
         Attempt to the Edge Node's SSA IoT Connector
         """
 
-        broker_config = self.config["runtime"]["broker"]
+        broker_config = self._config["runtime"]["broker"]
 
-        con_retries = self.config["runtime"]["connection"].get("retries", 3)
-        con_timeout_ms = self.config["runtime"]["connection"].get("timeout_ms", 1000)
+        con_retries = self._config["runtime"]["connection"].get("retries", 3)
+        con_timeout_ms = self._config["runtime"]["connection"].get("timeout_ms", 1000)
 
         from ._setup import initialize_mqtt_client, init_wlan
 
-        self._wlan = init_wlan(self.config["network"])
+        self._wlan = init_wlan(self._config["network"])
         self._mqtt = initialize_mqtt_client(self.id, broker_config)
 
         def connect_wlan():
@@ -116,7 +116,7 @@ class uMQTTCore(SSACore):
 
         Subclasses must override this method to implement the device registration logic.
         """
-        self.id = self.config.get("id")
+        self.id = self._config.get("id")
         if self.id is not None:
             return  # already registered
 
@@ -125,7 +125,7 @@ class uMQTTCore(SSACore):
 
         self.id = hexlify(unique_id()).decode("utf-8")
 
-        registration_payload = self._serializer.dumps(self.config["tm"])
+        registration_payload = self._serializer.dumps(self._config["tm"])
         self._mqtt.publish(f"ssa/{self.id}/registration", registration_payload)
 
         def on_registration(topic, payload):
@@ -240,7 +240,7 @@ class uMQTTCore(SSACore):
         self._properties[property_name] = value
 
         try:
-            namespace = self.config["tm"]["name"]
+            namespace = self._config["tm"]["name"]
             topic = f"{self._base_property_topic}/{namespace}/{property_name}"
             payload = self._serializer.dumps(value)
             self._mqtt.publish(topic, payload, retain=retain, qos=qos)
@@ -248,14 +248,14 @@ class uMQTTCore(SSACore):
             # TODO: publish the error
             raise ValueError(f"Failed to set property {property_name}: {e}") from e
 
-    def emit_event(self, event_name, event_data, retain=False, qos=0**_):
+    def emit_event(self, event_name, event_data, retain=False, qos=0, **_):
         """
         Interface: AffordanceHandler
 
         Emit an event with the specified name and data.
         """
         # TODO: sanitize event names
-        namespace = self.config["tm"]["name"]
+        namespace = self._config["tm"]["name"]
         topic = f"{self._base_event_topic}/{namespace}/{event_name}"
         payload = self._serializer.dumps(event_data)
         self._mqtt.publish(topic, payload, retain=retain, qos=qos)
@@ -302,7 +302,7 @@ class uMQTTCore(SSACore):
         # TODO: sanitize action names
         self._actions[action_name] = action_func
 
-        namespace = self.config["tm"]["name"]
+        namespace = self._config["tm"]["name"]
         self._mqtt.subscribe(
             f"{self._base_action_topic}/{namespace}/{action_name}", qos=qos
         )
@@ -319,7 +319,7 @@ class uMQTTCore(SSACore):
                 action_name, self._builtin_actions[action_name](action_input)
             )
 
-        elif namespace == self.config["tm"]["name"] and action_name in self._actions:
+        elif namespace == self._config["tm"]["name"] and action_name in self._actions:
             self.task_create(action_name, self._actions[action_name](action_input))
 
         raise ValueError(
