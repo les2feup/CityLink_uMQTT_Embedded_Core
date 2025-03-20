@@ -178,14 +178,19 @@ class uMQTTCore(SSACore):
             """Decorates the main function of the SSACore."""
 
             def main_wrapper():
-                """Wrapper for the main function of the SSACore."""kj
+                """Wrapper for the main function of the SSACore."""
                 core._connect()
                 core._register_device()
                 core._setup_mqtt()
 
-                from ._setup import mqtt_setup
+                async def main_task():
+                    main_func()
+                    while True:
+                        blocking = len(core._tasks) == 0
+                        core._listen(blocking)
+                        await core.task_sleep_ms(100)
 
-                uMQTTCore._start_scheduler()
+                core._start_scheduler(main_task())
 
             return main_wrapper
 
@@ -310,18 +315,27 @@ class uMQTTCore(SSACore):
         """
 
         if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
-            self.create_task(self._builtin_actions[action_name](action_input))
+            self.task_create(action_name, self._builtin_actions[action_name](action_input))
 
         elif namespace == self.config["tm"]["name"] and action_name in self._actions:
-            self.create_task(self._actions[action_name](action_input))
+            self.task_create(action_name, self._actions[action_name](action_input))
 
         raise ValueError(f"Action handler for {namespace}/{action_name} does not exist.")
 
     def _wrap_builtin_action(action_func):
         async def builtin_action_wrapper(self, action_input):
             action_result = action_func(self, action_input)
+
+            from time import gmtime, mktime
+            action_result.update({
+                "timestamp":{
+                    "epoch_year": gmtime()[0],
+                    "seconds": mktime(gmtime())
+                    }
+                })
+
             action_result = self._serializer.dumps(action_result)
-            self._mqtt.publish(f"{self._base_action_topic}/", action_result)
+            self._mqtt.publish(f"{self._base_event_topic}/{RT_NAMESPACE}/vfs/report", action_result, retain=False, qos=1)
 
         return builtin_action_wrapper
 
@@ -337,10 +351,31 @@ class uMQTTCore(SSACore):
         """
         Interface: AffordanceHandler
         Write data to a file in the virtual file system."""
-        raise NotImplementedError(
-            "Subclasses must implement builtin_action_vfs_write()"
-        )
+        try:
+            file_path = action_input.get("path")
+            if file_path is None:
+                raise ValueError("Missing path in action input.")
 
+            payload = action_input.get("payload")
+            if payload is None or not isinstance(payload, dict):
+                raise ValueError("Missing or invalid payload in action input.")
+
+            data = payload.get("data")
+            data_hash = payload.get("hash")
+            data_hash_algo = payload.get("algo")
+
+            if any(map(lambda x: x is None, [data, data_hash, data_hash_algo])):
+                raise ValueError("Missing or invalid payload data.")
+
+            append = action_input.get("append", False)
+
+            from ._builtins import vfs_write
+            vfs_write(file_path, append, data, data_hash, data_hash_algo)
+
+            return {"action": "write", "error": False, "message": file_path}
+        except Exception as e:
+            return {"action": "write", "error": True, "message": str(e)}
+        
     @_wrap_builtin_action
     def _builtin_action_vfs_list(self, action_input):
         """
@@ -462,5 +497,3 @@ class uMQTTCore(SSACore):
             ms: Duration to sleep in milliseconds.
         """
         await asyncio.sleep_ms(ms)
-
-
