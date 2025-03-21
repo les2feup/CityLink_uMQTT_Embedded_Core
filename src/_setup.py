@@ -22,7 +22,7 @@ def mqtt_setup(client_id, rt_namespace, mqtt_client, on_message):
 def initialize_mqtt_client(client_id, broker_config):
     client = MQTTClient(
         client_id=client_id,
-        server=broker_config["address"],
+        server=broker_config["hostname"],
         port=broker_config.get("port", 1883),
         user=broker_config.get("username"),
         password=broker_config.get("password"),

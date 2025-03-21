@@ -2,7 +2,9 @@ from ssa import SSACore
 from ssa.interfaces import Serializer
 
 from micropython import const
+
 import json
+import asyncio
 
 RT_NAMESPACE = "umqtt_core"
 
@@ -27,6 +29,8 @@ class uMQTTCore(SSACore):
             }
         )
 
+        self.is_registered = False
+
     def _load_config(self):
         """
         Interface: SSACore
@@ -38,6 +42,16 @@ class uMQTTCore(SSACore):
         self._config = load_configuration(
             self._config_dir, self._fopen_mode, self._serializer
         )
+
+        self._id = self._config.get("id")
+        if self._id is not None:
+            self.is_registered = True
+            return
+
+        from machine import unique_id
+        from binascii import hexlify
+
+        self._id = hexlify(unique_id()).decode("utf-8")
 
     def _write_config(self, update_dict):
         """
@@ -68,14 +82,20 @@ class uMQTTCore(SSACore):
         from ._setup import initialize_mqtt_client, init_wlan
 
         self._wlan = init_wlan(self._config["network"])
-        self._mqtt = initialize_mqtt_client(self.id, broker_config)
+        self._mqtt = initialize_mqtt_client(self._id, broker_config)
+
+        ssid = self._config["network"]["ssid"]
 
         def connect_wlan():
             if not self._wlan.isconnected():
                 raise Exception(f"connecting to `{ssid}` WLAN")
+            print(f"connected to `{ssid}` WLAN")
 
         def connect_mqtt():
-            self._mqtt.connect(broker_config.get(clean_session, True), timeout_ms)
+            self._mqtt.connect(broker_config.get("clean_session", True), con_timeout_ms)
+            print(
+                f"connected to MQTT broker at {broker_config['hostname']}:{broker_config.get('port', 1883)}"
+            )
 
         from ._utils import with_exponential_backoff
 
@@ -94,16 +114,13 @@ class uMQTTCore(SSACore):
 
         asyncio.current_task().cancel()
 
-    def _listen(self, blocking):
+    def _listen(self, *_):
         """
         Interface: SSACore
 
         Listen and handle incoming requests.
         """
-        if blocking:
-            self._mqtt.wait_msg()
-        else:
-            self._mqtt.check_msg()
+        self._mqtt.check_msg()
 
     def _register_device(self):
         """
@@ -116,40 +133,41 @@ class uMQTTCore(SSACore):
 
         Subclasses must override this method to implement the device registration logic.
         """
-        self.id = self._config.get("id")
-        if self.id is not None:
-            return  # already registered
-
-        from machine import unique_id
-        from binascii import hexlify
-
-        self.id = hexlify(unique_id()).decode("utf-8")
+        if self.is_registered:
+            print(f"Device already registered with ID: {self._id}")
+            return
 
         registration_payload = self._serializer.dumps(self._config["tm"])
-        self._mqtt.publish(f"ssa/{self.id}/registration", registration_payload)
+        self._mqtt.publish(f"ssa/{self._id}/registration", registration_payload)
 
         def on_registration(topic, payload):
-            topic = topic.decode("utf-8")
+            print(f"[DEBUG] Received registration ack: {topic} - {payload}")
             payload = self._serializer.loads(payload)
 
-            if topic != f"ssa/{self.id}/registration/ack":
+            if topic != f"ssa/{self._id}/registration/ack":
                 raise ValueError(f"Unexpected registration topic: {topic}")
 
             if payload["status"] != "success":
                 raise ValueError(f"Failed to register device: {payload['message']}")
 
-            self.id = payload["id"]
-            self._write_config({"id": self.id})
+            self._id = payload["id"]
+            self._write_config({"id": self._id})
+
+            self.is_registered = True
 
         self._mqtt.set_callback(on_registration)
-        self._mqtt.subscribe(f"ssa/{self.id}/{registration}/ack")
-        self._mqtt.wait_msg()  # Blocking wait for registration ack
+        self._mqtt.subscribe(f"ssa/{self._id}/registration/ack")
+
+        while not self.is_registered:
+            try:
+                self._listen(True)
+            except Exception as e:
+                print(f"Error listening on socket: {e}")
 
     def _setup_mqtt(self):
         from ._setup import mqtt_setup
 
         def on_message(topic, payload):
-            topic = topic.decode("utf-8")
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
@@ -161,7 +179,7 @@ class uMQTTCore(SSACore):
             self._invoke_action(namespace, action_name, action_input)
 
         self._base_event_topic, self._base_action_topic, self._base_property_topic = (
-            mqtt_setup(self.id, RT_NAMESPACE, self._mqtt, on_message)
+            mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
         )
 
     def SSACoreEntry(config_dir="./config", **kwargs):
@@ -184,11 +202,13 @@ class uMQTTCore(SSACore):
                 core._setup_mqtt()
 
                 async def main_task():
-                    main_func()
+                    main_func(core)
                     while True:
-                        blocking = len(core._tasks) == 0
-                        core._listen(blocking)
-                        await core.task_sleep_ms(100)
+                        try:
+                            core._listen()
+                        except Exception as e:
+                            raise Exception(f"[FATAL] Listen exception: {e}") from e
+                        await core.task_sleep_ms(200)
 
                 core._start_scheduler(main_task())
 
@@ -436,9 +456,11 @@ class uMQTTCore(SSACore):
                 if task.done():
                     del self._tasks[id]
 
+        print("Starting task scheduler...")
         loop = asyncio.new_event_loop()
-        loop.set_exception_handler(self._exception_handler)
+        loop.set_exception_handler(task_exception_handler)
 
+        print("Executing main task...")
         asyncio.run(main_task)
 
     def task_create(self, task_id, task_func):
@@ -458,7 +480,7 @@ class uMQTTCore(SSACore):
 
         def task_wrapper():
             try:
-                await task_func()
+                await task_func(self)
             except asyncio.CancelledError:
                 print(f"Task {task_id} was cancelled.")
             except Exception as e:
@@ -467,7 +489,7 @@ class uMQTTCore(SSACore):
             finally:
                 del self._tasks[task_id]
 
-        self._tasks[task_id] = asyncio.create_task(task_func())
+        self._tasks[task_id] = asyncio.create_task(task_wrapper())
 
     def task_cancel(self, task_id):
         """Cancel a registered task.
