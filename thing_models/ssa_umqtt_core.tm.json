@@ -84,17 +84,19 @@
                         "type": "object",
                         "title": "Epoch Timestamp",
                         "properties": {
-                            "Epoch": {
+                            "epoch_year": {
                                 "type": "integer",
-                                "title": "Epoch",
-                                "description": "Epoch timestamp."
+                                "description": "Starting year for the second count field. Most systems use the Unix epoch (1970) but some (embedded) platforms might use a different epoch. Example: some micropython ports use 2000 as the epoch year",
+                                "default": 1970
                             },
                             "seconds": {
                                 "type": "integer",
-                                "title": "Seconds",
                                 "description": "Seconds since the Unix epoch."
                             }
-                        }
+                        },
+                        "required": [
+                            "seconds"
+                        ]
                     },
                     "message": {
                         "title": "Message",
