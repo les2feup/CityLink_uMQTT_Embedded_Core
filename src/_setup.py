@@ -15,6 +15,7 @@ def mqtt_setup(client_id, rt_namespace, mqtt_client, on_message):
     mqtt_client.subscribe(f"{base_action_topic}/{rt_namespace}/vfs/write", qos=2)
     mqtt_client.subscribe(f"{base_action_topic}/{rt_namespace}/vfs/delete", qos=2)
     mqtt_client.subscribe(f"{base_action_topic}/{rt_namespace}/reload", qos=2)
+    mqtt_client.subscribe(f"{base_action_topic}/{rt_namespace}/set_property", qos=2)
 
     return (base_event_topic, base_action_topic, base_property_topic)
 

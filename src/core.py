@@ -18,6 +18,7 @@ class uMQTTCore(SSACore):
         self._tasks = {}
         self._actions = {}
         self._properties = {}
+        self._net_ro_props = set()
 
         self._builtin_actions = const(
             {
@@ -26,6 +27,7 @@ class uMQTTCore(SSACore):
                 "vfs/write": self._builtin_action_vfs_write,
                 "vfs/delete": self._builtin_action_vfs_delete,
                 "reload": self._builtin_action_reload_core,
+                "set_property": self._builtin_action_set_property,
             }
         )
 
@@ -168,6 +170,8 @@ class uMQTTCore(SSACore):
         from ._setup import mqtt_setup
 
         def on_message(topic, payload):
+
+            topic = topic.decode("utf-8")
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
@@ -204,11 +208,8 @@ class uMQTTCore(SSACore):
                 async def main_task():
                     main_func(core)
                     while True:
-                        try:
-                            core._listen()
-                        except Exception as e:
-                            raise Exception(f"[FATAL] Listen exception: {e}") from e
-                        await core.task_sleep_ms(200)
+                        core._listen()
+                        await core.task_sleep_ms(250)
 
                 core._start_scheduler(main_task())
 
@@ -218,7 +219,7 @@ class uMQTTCore(SSACore):
 
     ## AFFORDANCE HANDLER INTERFACE ##
 
-    def create_property(self, property_name, initial_value, **_):
+    def create_property(self, property_name, initial_value, net_ro=False, **_):
         """
         Interface: AffordanceHandler
 
@@ -231,6 +232,8 @@ class uMQTTCore(SSACore):
 
         # TODO: sanitize property names
 
+        if net_ro:
+            self._net_ro_props.add(property_name)
         self._properties[property_name] = initial_value
 
     def get_property(self, property_name, **_):
@@ -250,20 +253,30 @@ class uMQTTCore(SSACore):
         """
         Interface: AffordanceHandler
 
-        Set the value of a property.
+        Set the value of a property. Dict values are merged with the existing property value.
         """
         if property_name not in self._properties:
             raise ValueError(
                 f"Property {property_name} does not exist. Create it using 'create_property' method."
             )
 
-        self._properties[property_name] = value
+        if not isinstance(value, type(self._properties[property_name])):
+            raise ValueError(
+                f"Value of property '{property_name}' must be of type {type(self._properties[property_name]).__name__}"
+            )
+
+        if isinstance(value, dict):
+            self._properties[property_name].update(value)
+        else:
+            self._properties[property_name] = value
 
         try:
             namespace = self._config["tm"]["name"]
             topic = f"{self._base_property_topic}/{namespace}/{property_name}"
             payload = self._serializer.dumps(value)
+            print(f"[DEBUG] Publishing property: {topic} - {payload}")
             self._mqtt.publish(topic, payload, retain=retain, qos=qos)
+            print(f"[DEBUG] Published property successfully.")
         except Exception as e:
             # TODO: publish the error
             raise ValueError(f"Failed to set property {property_name}: {e}") from e
@@ -292,8 +305,6 @@ class uMQTTCore(SSACore):
         async def wrapper(self, *args, **kwargs):
             return func(self, *args, **kwargs)
 
-        # Copy the function name to allow for proper error messages
-        wrapper.__name__ = func.__name__
         return wrapper
 
     def async_action(func):
@@ -306,8 +317,6 @@ class uMQTTCore(SSACore):
         async def wrapper(self, *args, **kwargs):
             return await func(self, *args, **kwargs)
 
-        # Copy the function name to allow for proper error messages
-        wrapper.__name__ = func.__name__
         return wrapper
 
     def register_action_handler(self, action_name, action_func, qos=0, **_):
@@ -334,26 +343,26 @@ class uMQTTCore(SSACore):
         Invoke an action with the specified input.
         """
 
+        print(f"[DEBUG] Invoking action: {namespace}/{action_name} - {action_input}")
         if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
-            self.task_create(
-                action_name, self._builtin_actions[action_name](action_input)
-            )
+            asyncio.create_task(self._builtin_actions[action_name](action_input))
 
         elif namespace == self._config["tm"]["name"] and action_name in self._actions:
-            self.task_create(action_name, self._actions[action_name](action_input))
+            asyncio.create_task(self._actions[action_name](self, action_input))
 
-        raise ValueError(
-            f"Action handler for {namespace}/{action_name} does not exist."
-        )
+        else:
+            raise ValueError(
+                f"Action handler for {namespace}/{action_name} does not exist."
+            )
 
-    def _wrap_builtin_action(action_func):
-        async def builtin_action_wrapper(self, action_input):
+    def _wrap_vfs_action(action_func):
+        def builtin_action_wrapper(self, action_input):
             action_result = action_func(self, action_input)
 
             from time import gmtime, mktime
 
             action_result.update(
-                {"timestamp": {"epoch_year": gmtime()[0], "seconds": mktime(gmtime())}}
+                {"timestamp": {"epoch_year": gmtime(0)[0], "seconds": mktime(gmtime())}}
             )
 
             action_result = self._serializer.dumps(action_result)
@@ -366,14 +375,16 @@ class uMQTTCore(SSACore):
 
         return builtin_action_wrapper
 
-    @_wrap_builtin_action
+    @sync_action
+    @_wrap_vfs_action
     def _builtin_action_vfs_read(self, action_input):
         """
         Interface: AffordanceHandler
         Read the contents of a file from the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_read()")
 
-    @_wrap_builtin_action
+    @sync_action
+    @_wrap_vfs_action
     def _builtin_action_vfs_write(self, action_input):
         """
         Interface: AffordanceHandler
@@ -388,7 +399,7 @@ class uMQTTCore(SSACore):
                 raise ValueError("Missing or invalid payload in action input.")
 
             data = payload.get("data")
-            data_hash = payload.get("hash")
+            data_hash = int(payload.get("hash"), 16)
             data_hash_algo = payload.get("algo")
 
             if any(map(lambda x: x is None, [data, data_hash, data_hash_algo])):
@@ -404,14 +415,16 @@ class uMQTTCore(SSACore):
         except Exception as e:
             return {"action": "write", "error": True, "message": str(e)}
 
-    @_wrap_builtin_action
+    @sync_action
+    @_wrap_vfs_action
     def _builtin_action_vfs_list(self, action_input):
         """
         Interface: AffordanceHandler
         List the contents of the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_list()")
 
-    @_wrap_builtin_action
+    @sync_action
+    @_wrap_vfs_action
     def _builtin_action_vfs_delete(self, action_input):
         """
         Interface: AffordanceHandler
@@ -420,6 +433,25 @@ class uMQTTCore(SSACore):
             "Subclasses must implement builtin_action_vfs_delete()"
         )
 
+    @sync_action
+    def _builtin_action_set_property(self, action_input):
+        """
+        Interface: AffordanceHandler
+        Set the value of a property.
+        """
+        property_name = action_input.get("property")
+        property_value = action_input.get("value")
+        if property_name is None or property_value is None:
+            raise ValueError(
+                "Malformed action input. Input template: {'property': 'name_string', 'value': Any}"
+            )
+
+        if property_name in self._net_ro_props:
+            raise ValueError(f"Property {property_name} is read-only.")
+
+        self.set_property(property_name, property_value)
+
+    @sync_action
     def _builtin_action_reload_core(self, _):
         """
         Interface: AffordanceHandler
@@ -439,29 +471,32 @@ class uMQTTCore(SSACore):
         Launch the runtime and start running all registered tasks.
         """
 
-        def task_exception_handler(loop, context):
+        def loop_exception_handler(loop, context):
             """Handle exceptions raised in tasks."""
             future = context.get("future")
             msg = context.get("exception", context["message"])
 
+            future_name = getattr(future, "__name__", "unknown")
+
             # TODO: (try to) publish the error as an event
             if isinstance(msg, asyncio.CancelledError):
-                print(f"Task {future} was cancelled.")
+                print(f"{future} '{future_name}' was cancelled.")
             elif isinstance(msg, Exception):
-                print(f"Generic exception in task {future}: {msg}")
+                print(f"Generic exception in {future} '{future_name}': {msg}")
+                # TODO: publish the error
             else:
-                print(f"Unknown exception in task {future}: {msg}")
+                print(f"Unknown exception in {future} '{future_name}': {msg}")
 
-            for id, task in self._tasks:
-                if task.done():
-                    del self._tasks[id]
+            for task_id in self._tasks:
+                if self._tasks[task_id].done():
+                    del self._tasks[task_id]
 
         print("Starting task scheduler...")
         loop = asyncio.new_event_loop()
-        loop.set_exception_handler(task_exception_handler)
+        loop.set_exception_handler(loop_exception_handler)
 
         print("Executing main task...")
-        asyncio.run(main_task)
+        loop.run_until_complete(loop.create_task(main_task))
 
     def task_create(self, task_id, task_func):
         """
@@ -478,7 +513,7 @@ class uMQTTCore(SSACore):
         if task_id in self._tasks:
             raise ValueError(f"Task {task_id} already exists.")
 
-        def task_wrapper():
+        async def task_wrapper():
             try:
                 await task_func(self)
             except asyncio.CancelledError:
