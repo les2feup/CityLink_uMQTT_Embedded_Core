@@ -137,7 +137,10 @@
                                                     "description": "Size of the file in bytes."
                                                 }
                                             },
-                                            "required": ["path", "type"]
+                                            "required": [
+                                                "path",
+                                                "type"
+                                            ]
                                         }
                                     }
                                 }
@@ -202,7 +205,7 @@
                         "unsubscribeevent"
                     ],
                     "mqv:qos": 1,
-                    "mqv:retain": true,
+                    "mqv:retain": false,
                     "contentType": "application/json"
                 }
             ]
@@ -218,7 +221,6 @@
                         "invokeaction"
                     ],
                     "mqv:qos": 2,
-                    "mqv:retain": false,
                     "contentType": "application/json"
                 }
             ]
@@ -232,7 +234,6 @@
                         "invokeaction"
                     ],
                     "mqv:qos": 2,
-                    "mqv:retain": false,
                     "contentType": "application/json"
                 }
             ]
@@ -255,7 +256,6 @@
                         "invokeaction"
                     ],
                     "mqv:qos": 2,
-                    "mqv:retain": false,
                     "contentType": "application/json"
                 }
             ]
@@ -269,7 +269,6 @@
                         "invokeaction"
                     ],
                     "mqv:qos": 2,
-                    "mqv:retain": false,
                     "contentType": "application/json"
                 }
             ]
@@ -283,7 +282,20 @@
                         "invokeaction"
                     ],
                     "mqv:qos": 2,
-                    "mqv:retain": false
+                    "contentType": "application/json"
+                }
+            ]
+        },
+        "ssaCoreSetProperty": {
+            "forms": [
+                {
+                    "href": "mqtt://{{MQTT_BROKER_ADDR}}",
+                    "mqv:topic": "ssa/{{THING_UUID_V4}}/actions/umqtt_core/set_property",
+                    "op": [
+                        "invokeaction"
+                    ],
+                    "mqv:qos": 2,
+                    "contentType": "application/json"
                 }
             ]
         }
