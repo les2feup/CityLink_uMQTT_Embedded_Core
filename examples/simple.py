@@ -1,10 +1,11 @@
 """! Simple example app demonstrating the use of the Smart Sensor Actuator Hardware Abstraction Layer."""
 
 import random
-from ssa.core import ssa_main, SSA
+from ssa import SSACore
 
 
-async def random_event(ssa: SSA) -> None:
+@SSACore.sync_executor()
+def random_event(ssa: SSACore) -> None:
     """
     Triggers a random event with a 50% probability.
 
@@ -12,10 +13,11 @@ async def random_event(ssa: SSA) -> None:
     is met, emits an event named "random_event" with a corresponding message.
     """
     if random.randint(0, 1):
-        await ssa.emit_event("random_event", "Event triggered")
+        ssa.emit_event("random_event", "Event triggered")
 
 
-async def random_property_with_event(ssa: SSA) -> None:
+@SSACore.sync_executor()
+def random_property_with_event(ssa: SSACore) -> None:
     """
     Update the 'random_value' property and emit an event for high values.
 
@@ -24,12 +26,13 @@ async def random_property_with_event(ssa: SSA) -> None:
     it emits a 'random_value_event' with an appropriate message.
     """
     new_value: int = random.randint(0, 100)
-    await ssa.set_property("random_value", new_value, qos=0)
+    ssa.set_property("random_value", new_value, qos=0)
     if new_value > 70:
-        await ssa.emit_event("random_value_event", "Random value is greater than 70")
+        ssa.emit_event("random_value_event", "Random value is greater than 70")
 
 
-async def print_action(_ssa: SSA, msg: str) -> None:
+@SSACore.sync_executor()
+def print_action(_ssa: SSACore, msg: str) -> None:
     """
     Prints a formatted action message.
 
@@ -43,8 +46,8 @@ async def print_action(_ssa: SSA, msg: str) -> None:
     print(f"Simple action triggered with message: {msg}")
 
 
-@ssa_main()
-def main(ssa: SSA):
+@SSACore.App()
+def main(ssa: SSACore):
     """
     Main entry point for the SSA application.
 
@@ -52,7 +55,7 @@ def main(ssa: SSA):
     """
     ssa.create_property("random_value", 0)
 
-    ssa.rt_task_create("random_event", random_event, 1000)
-    ssa.rt_task_create("random_property", random_property_with_event, 2000)
+    ssa.task_create("random_event", random_event, 1000)
+    ssa.task_create("random_property", random_property_with_event, 2000)
 
-    ssa.register_action("print_action", print_action)
+    ssa.register_action_executor("print_action", print_action)
