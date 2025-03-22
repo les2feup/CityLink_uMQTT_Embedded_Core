@@ -38,13 +38,13 @@ class uMQTTCore(SSACore):
         self._net_ro_props = set()
 
         self._builtin_actions = {
-                "vfs/list": self._builtin_action_vfs_list,
-                "vfs/read": self._builtin_action_vfs_read,
-                "vfs/write": self._builtin_action_vfs_write,
-                "vfs/delete": self._builtin_action_vfs_delete,
-                "reload": self._builtin_action_reload_core,
-                "set_property": self._builtin_action_set_property,
-            }
+            "vfs/list": self._builtin_action_vfs_list,
+            "vfs/read": self._builtin_action_vfs_read,
+            "vfs/write": self._builtin_action_vfs_write,
+            "vfs/delete": self._builtin_action_vfs_delete,
+            "reload": self._builtin_action_reload_core,
+            "set_property": self._builtin_action_set_property,
+        }
 
         self.is_registered = False
 
@@ -225,7 +225,7 @@ class uMQTTCore(SSACore):
             mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
         )
 
-    def App(config_dir="./config", **kwargs):
+    def App(msg_polling_interval=250, config_dir="./config", **kwargs):
         """
         Decorator to mark the entry point for the SSACore.
 
@@ -233,6 +233,7 @@ class uMQTTCore(SSACore):
         the runtime environment.
 
         Args:
+            msg_polling_interval: Interval for message polling in milliseconds (default: 250)
             config_dir: Directory containing configuration files (default: "./config")
             **kwargs: Additional arguments passed to uMQTTCore constructor
 
@@ -268,8 +269,12 @@ class uMQTTCore(SSACore):
                 async def main_task():
                     main_func(core)
                     while True:
+                        start_time = ticks_ms()
                         core._listen()
-                        await core.task_sleep_ms(250)
+                        elapsed_time = ticks_diff(ticks_ms(), start_time)
+                        await core.task_sleep_ms(
+                            max(0, msg_polling_interval - elapsed_time)
+                        )
 
                 core._start_scheduler(main_task())
 
@@ -562,13 +567,13 @@ class uMQTTCore(SSACore):
         Interface: AffordanceHandler
         """
         result = {"action": "write", "error": False, "message": ""}
-        
+
         file_path = action_input.get("path")
         if file_path is None:
             result["error"] = True
             result["message"] = "Missing path in action input."
             return result
-        
+
         payload = action_input.get("payload")
         if payload is None or not isinstance(payload, dict):
             result["error"] = True
