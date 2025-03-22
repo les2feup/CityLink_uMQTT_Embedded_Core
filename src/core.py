@@ -13,7 +13,23 @@ RT_NAMESPACE = "umqtt_core"
 
 
 class uMQTTCore(SSACore):
+    """
+    MQTT-based implementation of the SSA Core for MicroPython.
+
+    This class provides a lightweight MQTT client for IoT devices running MicroPython,
+    with support for SSA (Simple Service Architecture) pattern.
+    """
+
     def __init__(self, config_dir, fopen_mode="r", serializer: Serializer = json, **_):
+        """
+        Initialize the uMQTTCore with configuration and serialization parameters.
+
+        Args:
+            config_dir: Directory containing configuration files
+            fopen_mode: File open mode (default: "r")
+            serializer: Object with dumps/loads methods for serialization (default: json)
+            **_: Additional keyword arguments (ignored)
+        """
         self._config_dir = config_dir
         self._fopen_mode = fopen_mode
         self._serializer = serializer
@@ -38,9 +54,12 @@ class uMQTTCore(SSACore):
 
     def _load_config(self):
         """
-        Interface: SSACore
-
         Load the configuration from the specified directory.
+
+        Loads configuration files from the specified directory and sets up
+        the device ID. If no ID exists, generates one from the device's unique ID.
+
+        Interface: SSACore
         """
         from ._config import load_configuration
 
@@ -60,9 +79,15 @@ class uMQTTCore(SSACore):
 
     def _write_config(self, update_dict):
         """
-        Interface: SSACore
-
         Write the configuration to the specified directory.
+
+        Updates the current configuration with provided dictionary
+        and persists it to storage.
+
+        Args:
+            update_dict: Dictionary containing configuration updates
+
+        Interface: SSACore
         """
         self._config.update(update_dict)
 
@@ -74,11 +99,13 @@ class uMQTTCore(SSACore):
 
     def _connect(self):
         """
+        Attempt to connect to the Edge Node's SSA IoT Connector.
+
+        Establishes connections to the configured WiFi network and MQTT broker
+        with exponential backoff for retries.
+
         Interface: SSACore
-
-        Attempt to the Edge Node's SSA IoT Connector
         """
-
         broker_config = self._config["runtime"]["broker"]
 
         con_retries = self._config["runtime"]["connection"].get("retries", 3)
@@ -109,31 +136,36 @@ class uMQTTCore(SSACore):
 
     def _disconnect(self):
         """
-        Interface: SSACore
+        Disconnect from the network and exit the runtime.
 
-        Disconnect from the network. And exit the runtime.
+        Terminates MQTT broker connection and disconnects from WiFi network.
+
+        Interface: SSACore
         """
         self._mqtt.disconnect()
         self._wlan.disconnect()
 
     def _listen(self, *_):
         """
-        Interface: SSACore
-
         Listen and handle incoming requests.
+
+        Checks for new MQTT messages and processes them.
+
+        Args:
+            *_: Variable arguments (ignored)
+
+        Interface: SSACore
         """
         self._mqtt.check_msg()
 
     def _register_device(self):
         """
+        Register the device with the WoT servient.
+
+        Sends registration request to the WoT servient and waits for confirmation.
+        If already registered, skips the registration process.
+
         Interface: SSACore
-
-        Registers the device with the WoT servient.
-
-        Send registration request to the WoT servient to register the device.
-        Wait for registration confirmation before proceeding.
-
-        Subclasses must override this method to implement the device registration logic.
         """
         if self.is_registered:
             print(f"Device already registered with ID: {self._id}")
@@ -167,6 +199,11 @@ class uMQTTCore(SSACore):
                 print(f"Error listening on socket: {e}")
 
     def _setup_mqtt(self):
+        """
+        Set up MQTT topic structure and message handling.
+
+        Configures MQTT callbacks and topic subscriptions for action handling.
+        """
         from ._setup import mqtt_setup
 
         def on_message(topic, payload):
@@ -178,7 +215,7 @@ class uMQTTCore(SSACore):
             topic = topic[len(f"{self._base_action_topic}/") :]
 
             namespace, action_name = topic.split("/", 1)
-            action_input = None 
+            action_input = None
             if payload != b"":
                 try:
                     action_input = self._serializer.loads(payload)
@@ -194,19 +231,40 @@ class uMQTTCore(SSACore):
 
     def App(config_dir="./config", **kwargs):
         """
-        Interface: SSACore
-
         Decorator to mark the entry point for the SSACore.
-        """
 
+        Creates a uMQTTCore instance, loads configuration, and sets up
+        the runtime environment.
+
+        Args:
+            config_dir: Directory containing configuration files (default: "./config")
+            **kwargs: Additional arguments passed to uMQTTCore constructor
+
+        Returns:
+            Function decorator that wraps the main application entry point
+
+        Interface: SSACore
+        """
         core = uMQTTCore(config_dir, **kwargs)
         core._load_config()
 
         def main_decorator(main_func):
-            """Decorates the main function of the SSACore."""
+            """
+            Decorates the main function of the SSACore.
+
+            Args:
+                main_func: The main function to be decorated
+
+            Returns:
+                Wrapped function that initializes the runtime
+            """
 
             def main_wrapper():
-                """Wrapper for the main function of the SSACore."""
+                """
+                Wrapper for the main function of the SSACore.
+
+                Handles connection, registration, MQTT setup, and scheduler launch.
+                """
                 core._connect()
                 core._register_device()
                 core._setup_mqtt()
@@ -227,9 +285,18 @@ class uMQTTCore(SSACore):
 
     def create_property(self, property_name, initial_value, net_ro=False, **_):
         """
-        Interface: AffordanceHandler
-
         Create a new property with the specified name and initial value.
+
+        Args:
+            property_name: Name of the property to create
+            initial_value: Initial value for the property
+            net_ro: If True, property is read-only over the network (default: False)
+            **_: Additional keyword arguments (ignored)
+
+        Raises:
+            ValueError: If property already exists
+
+        Interface: AffordanceHandler
         """
         if property_name in self._properties:
             raise ValueError(
@@ -244,9 +311,19 @@ class uMQTTCore(SSACore):
 
     def get_property(self, property_name, **_):
         """
-        Interface: AffordanceHandler
-
         Get the value of a property by name.
+
+        Args:
+            property_name: Name of the property to retrieve
+            **_: Additional keyword arguments (ignored)
+
+        Returns:
+            Current value of the property
+
+        Raises:
+            ValueError: If property does not exist
+
+        Interface: AffordanceHandler
         """
         if property_name not in self._properties:
             raise ValueError(
@@ -257,9 +334,22 @@ class uMQTTCore(SSACore):
 
     def set_property(self, property_name, value, retain=True, qos=0, **_):
         """
-        Interface: AffordanceHandler
+        Set the value of a property.
 
-        Set the value of a property. Dict values are merged with the existing property value.
+        Updates a property value and publishes it via MQTT. For dict values,
+        merges with the existing property value.
+
+        Args:
+            property_name: Name of the property to update
+            value: New value for the property
+            retain: MQTT retain flag (default: True)
+            qos: MQTT QoS level (default: 0)
+            **_: Additional keyword arguments (ignored)
+
+        Raises:
+            ValueError: If property does not exist or has type mismatch
+
+        Interface: AffordanceHandler
         """
         if property_name not in self._properties:
             raise ValueError(
@@ -289,9 +379,18 @@ class uMQTTCore(SSACore):
 
     def emit_event(self, event_name, event_data, retain=False, qos=0, **_):
         """
-        Interface: AffordanceHandler
-
         Emit an event with the specified name and data.
+
+        Publishes an event to the MQTT broker with the given payload.
+
+        Args:
+            event_name: Name of the event to emit
+            event_data: Data payload for the event
+            retain: MQTT retain flag (default: False)
+            qos: MQTT QoS level (default: 0)
+            **_: Additional keyword arguments (ignored)
+
+        Interface: AffordanceHandler
         """
         # TODO: sanitize event names
         namespace = self._config["tm"]["name"]
@@ -301,9 +400,17 @@ class uMQTTCore(SSACore):
 
     def sync_executor(func):
         """
-        Interface: AffordanceHandler
-
         Decorator for synchronous task or action executors.
+
+        Wraps a synchronous function to make it compatible with async execution.
+
+        Args:
+            func: Synchronous function to wrap
+
+        Returns:
+            Async-compatible wrapped function
+
+        Interface: AffordanceHandler
         """
 
         # Wrap the function in an async wrapper
@@ -315,9 +422,17 @@ class uMQTTCore(SSACore):
 
     def async_executor(func):
         """
-        Interface: AffordanceHandler
-
         Decorator for asynchronous task or action executors.
+
+        Ensures proper async execution for functions that are already coroutines.
+
+        Args:
+            func: Async function to wrap
+
+        Returns:
+            Properly wrapped async function
+
+        Interface: AffordanceHandler
         """
 
         async def wrapper(self, *args, **kwargs):
@@ -327,9 +442,21 @@ class uMQTTCore(SSACore):
 
     def register_action_executor(self, action_name, action_func, qos=0, **_):
         """
-        Interface: AffordanceHandler
-
         Register a new action handler.
+
+        Associates an action name with a function and subscribes to the
+        corresponding MQTT topic.
+
+        Args:
+            action_name: Name of the action to register
+            action_func: Function to execute when the action is triggered
+            qos: MQTT QoS level (default: 0)
+            **_: Additional keyword arguments (ignored)
+
+        Raises:
+            ValueError: If action already exists
+
+        Interface: AffordanceHandler
         """
         if action_name in self._actions:
             raise ValueError(f"Action {action_name} already exists.")
@@ -344,11 +471,22 @@ class uMQTTCore(SSACore):
 
     def _invoke_action(self, namespace, action_name, action_input, **_):
         """
-        Interface: AffordanceHandler
-
         Invoke an action with the specified input.
-        """
 
+        Executes either a built-in action or a user-defined action based on
+        the namespace and action name.
+
+        Args:
+            namespace: Namespace for the action
+            action_name: Name of the action to invoke
+            action_input: Input data for the action
+            **_: Additional keyword arguments (ignored)
+
+        Raises:
+            ValueError: If action handler does not exist
+
+        Interface: AffordanceHandler
+        """
         print(f"[DEBUG] Invoking action: {namespace}/{action_name} - {action_input}")
         if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
             asyncio.create_task(self._builtin_actions[action_name](action_input))
@@ -362,6 +500,18 @@ class uMQTTCore(SSACore):
             )
 
     def _wrap_vfs_action(action_func):
+        """
+        Decorator for VFS action handlers.
+
+        Wraps VFS actions to add timestamps and publish results as events.
+
+        Args:
+            action_func: VFS action function to wrap
+
+        Returns:
+            Wrapped function that publishes results
+        """
+
         def builtin_action_wrapper(self, action_input):
             action_result = action_func(self, action_input)
 
@@ -385,16 +535,35 @@ class uMQTTCore(SSACore):
     @_wrap_vfs_action
     def _builtin_action_vfs_read(self, action_input):
         """
+        Read the contents of a file from the virtual file system.
+
+        Args:
+            action_input: Dictionary containing the file path to read
+
+        Returns:
+            Dictionary with action result
+
+        Raises:
+            NotImplementedError: Must be implemented by subclasses
+
         Interface: AffordanceHandler
-        Read the contents of a file from the virtual file system."""
+        """
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_read()")
 
     @sync_executor
     @_wrap_vfs_action
     def _builtin_action_vfs_write(self, action_input):
         """
+        Write data to a file in the virtual file system.
+
+        Args:
+            action_input: Dictionary containing path, payload, and append flag
+
+        Returns:
+            Dictionary with action result and error status
+
         Interface: AffordanceHandler
-        Write data to a file in the virtual file system."""
+        """
         try:
             file_path = action_input.get("path")
             if file_path is None:
@@ -425,16 +594,38 @@ class uMQTTCore(SSACore):
     @_wrap_vfs_action
     def _builtin_action_vfs_list(self, action_input):
         """
+        List the contents of the virtual file system.
+
+        Args:
+            action_input: Dictionary containing parameters for listing
+
+        Returns:
+            Dictionary with listing results
+
+        Raises:
+            NotImplementedError: Must be implemented by subclasses
+
         Interface: AffordanceHandler
-        List the contents of the virtual file system."""
+        """
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_list()")
 
     @sync_executor
     @_wrap_vfs_action
     def _builtin_action_vfs_delete(self, action_input):
         """
+        Delete a file from the virtual file system.
+
+        Args:
+            action_input: Dictionary containing the file path to delete
+
+        Returns:
+            Dictionary with deletion result
+
+        Raises:
+            NotImplementedError: Must be implemented by subclasses
+
         Interface: AffordanceHandler
-        Delete a file from the virtual file system."""
+        """
         raise NotImplementedError(
             "Subclasses must implement builtin_action_vfs_delete()"
         )
@@ -442,8 +633,15 @@ class uMQTTCore(SSACore):
     @sync_executor
     def _builtin_action_set_property(self, action_input):
         """
-        Interface: AffordanceHandler
         Set the value of a property.
+
+        Args:
+            action_input: Dictionary containing property name and value
+
+        Raises:
+            ValueError: If property is read-only or input is malformed
+
+        Interface: AffordanceHandler
         """
         property_name = action_input.get("property")
         property_value = action_input.get("value")
@@ -460,8 +658,15 @@ class uMQTTCore(SSACore):
     @sync_executor
     def _builtin_action_reload_core(self, _):
         """
+        Reload the core module.
+
+        Disconnects from network services and performs a soft reset of the device.
+
+        Args:
+            _: Input parameter (ignored)
+
         Interface: AffordanceHandler
-        Reload the core module."""
+        """
         try:
             self._disconnect()
         except Exception as e:
@@ -476,13 +681,25 @@ class uMQTTCore(SSACore):
 
     def _start_scheduler(self, main_task):
         """
-        Interface: TaskScheduler
-
         Launch the runtime and start running all registered tasks.
+
+        Sets up the asyncio event loop with exception handling and runs
+        the main application task.
+
+        Args:
+            main_task: Primary coroutine to execute
+
+        Interface: TaskScheduler
         """
 
         def loop_exception_handler(loop, context):
-            """Handle exceptions raised in tasks."""
+            """
+            Handle exceptions raised in tasks.
+
+            Args:
+                loop: The event loop
+                context: Exception context
+            """
             future = context.get("future")
             msg = context.get("exception", context["message"])
 
@@ -511,25 +728,24 @@ class uMQTTCore(SSACore):
     def task_create(self, task_id, task_func, period_ms=0):
         """
         Register a task for execution.
+
         Associates a unique task identifier with a callable that encapsulates the task's logic.
-        Subclasses must override this method to provide the actual task scheduling or execution
-        mechanism.
-        
+
         Args:
             task_id: A unique identifier for the task. Must be unique across all active tasks.
-            task_func: A callable implementing the task's functionality. Should be an async 
+            task_func: A callable implementing the task's functionality. Should be an async
                       function that accepts 'self' as its parameter.
             period_ms: The period in milliseconds between consecutive executions of the task.
                       If set to 0 (default), the task will execute only once (one-shot task).
                       If greater than 0, the task will execute repeatedly at the specified interval.
-        
+
         Raises:
             ValueError: If a task with the specified task_id already exists.
-        
+
         Notes:
-            - For periodic tasks, the time spent executing the task is considered when 
+            - For periodic tasks, the time spent executing the task is considered when
               calculating the next execution time.
-            - Tasks are automatically removed from the registry when they exit or raise 
+            - Tasks are automatically removed from the registry when they exit or raise
               an unhandled exception.
         """
         if task_id in self._tasks:
@@ -562,17 +778,21 @@ class uMQTTCore(SSACore):
             del self._tasks[task_id]
 
         if period_ms == 0:
-            asyncio.create_task(try_wrapper()) # One shot task
+            asyncio.create_task(try_wrapper())  # One shot task
         else:
             self._tasks[task_id] = asyncio.create_task(task_wrapper())
 
     def task_cancel(self, task_id):
-        """Cancel a registered task.
+        """
+        Cancel a registered task.
 
-        Cancel the task identified by the given task_id. This method serves as a stub and must be overridden by subclasses to implement task cancellation. Calling this method directly will raise a NotImplementedError.
+        Cancels the task identified by the given task_id.
 
         Args:
             task_id: The identifier of the task to cancel.
+
+        Raises:
+            ValueError: If task with the specified ID does not exist
         """
         if task_id not in self._tasks:
             raise ValueError(f"Task {task_id} does not exist.")
@@ -580,10 +800,8 @@ class uMQTTCore(SSACore):
         self._tasks[task_id].cancel()
 
     async def task_sleep_s(self, s):
-        """Asynchronously sleep for the specified number of seconds.
-
-        This abstract method must be implemented by subclasses to pause
-        execution asynchronously for the given duration.
+        """
+        Asynchronously sleep for the specified number of seconds.
 
         Args:
             s (int | float): The sleep duration in seconds.
@@ -593,9 +811,6 @@ class uMQTTCore(SSACore):
     async def task_sleep_ms(self, ms):
         """
         Asynchronously pause execution for a specified number of milliseconds.
-
-        This coroutine should suspend execution for the provided duration. Subclasses
-        must override this method to implement the actual sleep behavior.
 
         Args:
             ms: Duration to sleep in milliseconds.

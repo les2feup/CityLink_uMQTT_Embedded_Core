@@ -7,7 +7,9 @@ def vfs_write(file_path, append, data, data_hash, data_hash_algo):
 
     actual_hash = crc32(data)
     if actual_hash != data_hash:
-        raise ValueError(f"Hash mismatch, expected {hex(data_hash)}, got {hex(actual_hash)}")
+        raise ValueError(
+            f"Hash mismatch, expected {hex(data_hash)}, got {hex(actual_hash)}"
+        )
 
     mode = "a" if append else "w"
 
