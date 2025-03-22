@@ -6,11 +6,14 @@ from micropython import const
 import json
 import asyncio
 
+from time import ticks_ms, ticks_diff
+
+
 RT_NAMESPACE = "umqtt_core"
 
 
 class uMQTTCore(SSACore):
-    def __init__(self, config_dir, fopen_mode="r", serializer: Serializer = json):
+    def __init__(self, config_dir, fopen_mode="r", serializer: Serializer = json, **_):
         self._config_dir = config_dir
         self._fopen_mode = fopen_mode
         self._serializer = serializer
@@ -110,11 +113,8 @@ class uMQTTCore(SSACore):
 
         Disconnect from the network. And exit the runtime.
         """
-
         self._mqtt.disconnect()
         self._wlan.disconnect()
-
-        asyncio.current_task().cancel()
 
     def _listen(self, *_):
         """
@@ -170,15 +170,21 @@ class uMQTTCore(SSACore):
         from ._setup import mqtt_setup
 
         def on_message(topic, payload):
-
             topic = topic.decode("utf-8")
+            print(f"[DEBUG] Received message: {topic} - {payload}")
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
             topic = topic[len(f"{self._base_action_topic}/") :]
 
             namespace, action_name = topic.split("/", 1)
-            action_input = self._serializer.loads(payload)
+            action_input = None 
+            if payload != b"":
+                try:
+                    action_input = self._serializer.loads(payload)
+                except Exception as e:
+                    print(f"Failed to deserialize payload: {e}")
+                    return
 
             self._invoke_action(namespace, action_name, action_input)
 
@@ -186,7 +192,7 @@ class uMQTTCore(SSACore):
             mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
         )
 
-    def SSACoreEntry(config_dir="./config", **kwargs):
+    def App(config_dir="./config", **kwargs):
         """
         Interface: SSACore
 
@@ -293,11 +299,11 @@ class uMQTTCore(SSACore):
         payload = self._serializer.dumps(event_data)
         self._mqtt.publish(topic, payload, retain=retain, qos=qos)
 
-    def sync_action(func):
+    def sync_executor(func):
         """
         Interface: AffordanceHandler
 
-        Decorator for synchronous action handlers.
+        Decorator for synchronous task or action executors.
         """
 
         # Wrap the function in an async wrapper
@@ -307,11 +313,11 @@ class uMQTTCore(SSACore):
 
         return wrapper
 
-    def async_action(func):
+    def async_executor(func):
         """
         Interface: AffordanceHandler
 
-        Decorator for asynchronous action handlers.
+        Decorator for asynchronous task or action executors.
         """
 
         async def wrapper(self, *args, **kwargs):
@@ -319,7 +325,7 @@ class uMQTTCore(SSACore):
 
         return wrapper
 
-    def register_action_handler(self, action_name, action_func, qos=0, **_):
+    def register_action_executor(self, action_name, action_func, qos=0, **_):
         """
         Interface: AffordanceHandler
 
@@ -375,7 +381,7 @@ class uMQTTCore(SSACore):
 
         return builtin_action_wrapper
 
-    @sync_action
+    @sync_executor
     @_wrap_vfs_action
     def _builtin_action_vfs_read(self, action_input):
         """
@@ -383,7 +389,7 @@ class uMQTTCore(SSACore):
         Read the contents of a file from the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_read()")
 
-    @sync_action
+    @sync_executor
     @_wrap_vfs_action
     def _builtin_action_vfs_write(self, action_input):
         """
@@ -415,7 +421,7 @@ class uMQTTCore(SSACore):
         except Exception as e:
             return {"action": "write", "error": True, "message": str(e)}
 
-    @sync_action
+    @sync_executor
     @_wrap_vfs_action
     def _builtin_action_vfs_list(self, action_input):
         """
@@ -423,7 +429,7 @@ class uMQTTCore(SSACore):
         List the contents of the virtual file system."""
         raise NotImplementedError("Subclasses must implement builtin_action_vfs_list()")
 
-    @sync_action
+    @sync_executor
     @_wrap_vfs_action
     def _builtin_action_vfs_delete(self, action_input):
         """
@@ -433,7 +439,7 @@ class uMQTTCore(SSACore):
             "Subclasses must implement builtin_action_vfs_delete()"
         )
 
-    @sync_action
+    @sync_executor
     def _builtin_action_set_property(self, action_input):
         """
         Interface: AffordanceHandler
@@ -451,15 +457,19 @@ class uMQTTCore(SSACore):
 
         self.set_property(property_name, property_value)
 
-    @sync_action
+    @sync_executor
     def _builtin_action_reload_core(self, _):
         """
         Interface: AffordanceHandler
         Reload the core module."""
-        self._disconnect()
+        try:
+            self._disconnect()
+        except Exception as e:
+            print(f"Failed to disconnect: {e}")
 
         from machine import soft_reset
 
+        print("Reloading core module...")
         soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
@@ -498,33 +508,63 @@ class uMQTTCore(SSACore):
         print("Executing main task...")
         loop.run_until_complete(loop.create_task(main_task))
 
-    def task_create(self, task_id, task_func):
+    def task_create(self, task_id, task_func, period_ms=0):
         """
         Register a task for execution.
-
         Associates a unique task identifier with a callable that encapsulates the task's logic.
         Subclasses must override this method to provide the actual task scheduling or execution
         mechanism.
-
+        
         Args:
-            task_id: A unique identifier for the task.
-            task_func: A callable implementing the task's functionality.
+            task_id: A unique identifier for the task. Must be unique across all active tasks.
+            task_func: A callable implementing the task's functionality. Should be an async 
+                      function that accepts 'self' as its parameter.
+            period_ms: The period in milliseconds between consecutive executions of the task.
+                      If set to 0 (default), the task will execute only once (one-shot task).
+                      If greater than 0, the task will execute repeatedly at the specified interval.
+        
+        Raises:
+            ValueError: If a task with the specified task_id already exists.
+        
+        Notes:
+            - For periodic tasks, the time spent executing the task is considered when 
+              calculating the next execution time.
+            - Tasks are automatically removed from the registry when they exit or raise 
+              an unhandled exception.
         """
         if task_id in self._tasks:
             raise ValueError(f"Task {task_id} already exists.")
 
-        async def task_wrapper():
+        async def try_wrapper():
             try:
                 await task_func(self)
             except asyncio.CancelledError:
                 print(f"Task {task_id} was cancelled.")
+                return True
             except Exception as e:
                 print(f"Error in task {task_id}: {e}")
-                # TODO: log the error
-            finally:
-                del self._tasks[task_id]
+                return True
 
-        self._tasks[task_id] = asyncio.create_task(task_wrapper())
+            return False
+
+        async def task_wrapper():
+            while True:
+                start_time = ticks_ms()
+
+                should_exit = await try_wrapper()
+
+                elapsed_time = ticks_diff(ticks_ms(), start_time)
+                await self.task_sleep_ms(max(0, period_ms - elapsed_time))
+
+                if should_exit:
+                    break
+
+            del self._tasks[task_id]
+
+        if period_ms == 0:
+            asyncio.create_task(try_wrapper()) # One shot task
+        else:
+            self._tasks[task_id] = asyncio.create_task(task_wrapper())
 
     def task_cancel(self, task_id):
         """Cancel a registered task.
