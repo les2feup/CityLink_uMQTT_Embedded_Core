@@ -1,8 +1,6 @@
 from ssa import SSACore
 from ssa.interfaces import Serializer
 
-from micropython import const
-
 import json
 import asyncio
 
@@ -39,8 +37,7 @@ class uMQTTCore(SSACore):
         self._properties = {}
         self._net_ro_props = set()
 
-        self._builtin_actions = const(
-            {
+        self._builtin_actions = {
                 "vfs/list": self._builtin_action_vfs_list,
                 "vfs/read": self._builtin_action_vfs_read,
                 "vfs/write": self._builtin_action_vfs_write,
@@ -48,7 +45,6 @@ class uMQTTCore(SSACore):
                 "reload": self._builtin_action_reload_core,
                 "set_property": self._builtin_action_set_property,
             }
-        )
 
         self.is_registered = False
 
@@ -366,11 +362,12 @@ class uMQTTCore(SSACore):
         else:
             self._properties[property_name] = value
 
+        namespace = self._config["tm"]["name"]
+        topic = f"{self._base_property_topic}/{namespace}/{property_name}"
+        payload = self._serializer.dumps(value)
+        print(f"[DEBUG] Publishing property: {topic} - {payload}")
+
         try:
-            namespace = self._config["tm"]["name"]
-            topic = f"{self._base_property_topic}/{namespace}/{property_name}"
-            payload = self._serializer.dumps(value)
-            print(f"[DEBUG] Publishing property: {topic} - {payload}")
             self._mqtt.publish(topic, payload, retain=retain, qos=qos)
             print(f"[DEBUG] Published property successfully.")
         except Exception as e:
@@ -564,31 +561,41 @@ class uMQTTCore(SSACore):
 
         Interface: AffordanceHandler
         """
+        result = {"action": "write", "error": False, "message": ""}
+        
+        file_path = action_input.get("path")
+        if file_path is None:
+            result["error"] = True
+            result["message"] = "Missing path in action input."
+            return result
+        
+        payload = action_input.get("payload")
+        if payload is None or not isinstance(payload, dict):
+            result["error"] = True
+            result["message"] = "Missing or invalid payload in action input."
+            return result
+
+        data = payload.get("data")
+        data_hash = int(payload.get("hash"), 16)
+        data_hash_algo = payload.get("algo")
+
+        if any(map(lambda x: x is None, [data, data_hash, data_hash_algo])):
+            result["error"] = True
+            result["message"] = "Missing or invalid payload contents."
+            return result
+
+        append = action_input.get("append", False)
+
         try:
-            file_path = action_input.get("path")
-            if file_path is None:
-                raise ValueError("Missing path in action input.")
-
-            payload = action_input.get("payload")
-            if payload is None or not isinstance(payload, dict):
-                raise ValueError("Missing or invalid payload in action input.")
-
-            data = payload.get("data")
-            data_hash = int(payload.get("hash"), 16)
-            data_hash_algo = payload.get("algo")
-
-            if any(map(lambda x: x is None, [data, data_hash, data_hash_algo])):
-                raise ValueError("Missing or invalid payload data.")
-
-            append = action_input.get("append", False)
-
             from ._builtins import vfs_write
 
             vfs_write(file_path, append, data, data_hash, data_hash_algo)
-
-            return {"action": "write", "error": False, "message": file_path}
+            result["message"] = file_path
         except Exception as e:
-            return {"action": "write", "error": True, "message": str(e)}
+            result["error"] = True
+            result["message"] = str(e)
+
+        return result
 
     @sync_executor
     @_wrap_vfs_action
