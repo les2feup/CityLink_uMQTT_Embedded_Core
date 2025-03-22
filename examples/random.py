@@ -1,10 +1,10 @@
 """! Simple example app demonstrating the use of the Smart Sensor Actuator Hardware Abstraction Layer."""
 
 import random
-from ssa import SSACore
+from ssa_core import SSACore
 
 
-@SSACore.sync_executor()
+@SSACore.sync_executor
 def random_event(ssa: SSACore) -> None:
     """
     Triggers a random event with a 50% probability.
@@ -16,7 +16,7 @@ def random_event(ssa: SSACore) -> None:
         ssa.emit_event("random_event", "Event triggered")
 
 
-@SSACore.sync_executor()
+@SSACore.sync_executor
 def random_property_with_event(ssa: SSACore) -> None:
     """
     Update the 'random_value' property and emit an event for high values.
@@ -31,7 +31,7 @@ def random_property_with_event(ssa: SSACore) -> None:
         ssa.emit_event("random_value_event", "Random value is greater than 70")
 
 
-@SSACore.sync_executor()
+@SSACore.sync_executor
 def print_action(_ssa: SSACore, msg: str) -> None:
     """
     Prints a formatted action message.
@@ -57,5 +57,4 @@ def main(ssa: SSACore):
 
     ssa.task_create("random_event", random_event, 1000)
     ssa.task_create("random_property", random_property_with_event, 2000)
-
     ssa.register_action_executor("print_action", print_action)

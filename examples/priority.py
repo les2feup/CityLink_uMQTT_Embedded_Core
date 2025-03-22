@@ -10,7 +10,7 @@ from ssa_core import SSACore
 from random import randint
 
 
-@SSACore.sync_executor()
+@SSACore.sync_executor
 def simulate_random_sensor(ssa: SSACore) -> None:
     """
     Simulate a sensor reading and trigger a corresponding event.

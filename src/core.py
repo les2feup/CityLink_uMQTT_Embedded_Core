@@ -48,6 +48,8 @@ class uMQTTCore(SSACore):
 
         self.is_registered = False
 
+        self.last_listen_time = ticks_ms()
+
     def _load_config(self):
         """
         Load the configuration from the specified directory.
@@ -141,7 +143,7 @@ class uMQTTCore(SSACore):
         self._mqtt.disconnect()
         self._wlan.disconnect()
 
-    def _listen(self, *_):
+    def _listen(self, keep_alive=None, *_):
         """
         Listen and handle incoming requests.
 
@@ -153,6 +155,12 @@ class uMQTTCore(SSACore):
         Interface: SSACore
         """
         self._mqtt.check_msg()
+
+        if keep_alive is not None:
+            keep_alive_thresh = keep_alive / 2
+            if ticks_diff(ticks_ms(), self.last_listen_time) > keep_alive_thresh:
+                self._mqtt.ping()
+                self.last_listen_time = ticks_ms()
 
     def _register_device(self):
         """
@@ -171,9 +179,10 @@ class uMQTTCore(SSACore):
         self._mqtt.publish(f"ssa/{self._id}/registration", registration_payload)
 
         def on_registration(topic, payload):
-            print(f"[DEBUG] Received registration ack: {topic} - {payload}")
+            topic = topic.decode("utf-8")
             payload = self._serializer.loads(payload)
 
+            #TODO: handle registration errors
             if topic != f"ssa/{self._id}/registration/ack":
                 raise ValueError(f"Unexpected registration topic: {topic}")
 
@@ -188,9 +197,12 @@ class uMQTTCore(SSACore):
         self._mqtt.set_callback(on_registration)
         self._mqtt.subscribe(f"ssa/{self._id}/registration/ack")
 
+        from time import sleep_ms
+        keep_alive_ms = self._config["runtime"]["connection"].get("keepalive", 60) * 1000 # in ms
         while not self.is_registered:
             try:
-                self._listen(True)
+                self._listen(keep_alive=keep_alive_ms)
+                sleep_ms(250)
             except Exception as e:
                 print(f"Error listening on socket: {e}")
 
@@ -204,7 +216,6 @@ class uMQTTCore(SSACore):
 
         def on_message(topic, payload):
             topic = topic.decode("utf-8")
-            print(f"[DEBUG] Received message: {topic} - {payload}")
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
@@ -244,6 +255,7 @@ class uMQTTCore(SSACore):
         """
         core = uMQTTCore(config_dir, **kwargs)
         core._load_config()
+        keep_alive_ms = core._config["runtime"]["connection"].get("keepalive", 0) * 1000
 
         def main_decorator(main_func):
             """
@@ -270,7 +282,7 @@ class uMQTTCore(SSACore):
                     main_func(core)
                     while True:
                         start_time = ticks_ms()
-                        core._listen()
+                        core._listen(keep_alive=keep_alive_ms)
                         elapsed_time = ticks_diff(ticks_ms(), start_time)
                         await core.task_sleep_ms(
                             max(0, msg_polling_interval - elapsed_time)
@@ -370,11 +382,9 @@ class uMQTTCore(SSACore):
         namespace = self._config["tm"]["name"]
         topic = f"{self._base_property_topic}/{namespace}/{property_name}"
         payload = self._serializer.dumps(value)
-        print(f"[DEBUG] Publishing property: {topic} - {payload}")
 
         try:
             self._mqtt.publish(topic, payload, retain=retain, qos=qos)
-            print(f"[DEBUG] Published property successfully.")
         except Exception as e:
             # TODO: publish the error
             raise ValueError(f"Failed to set property {property_name}: {e}") from e
@@ -489,7 +499,6 @@ class uMQTTCore(SSACore):
 
         Interface: AffordanceHandler
         """
-        print(f"[DEBUG] Invoking action: {namespace}/{action_name} - {action_input}")
         if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
             asyncio.create_task(self._builtin_actions[action_name](action_input))
 

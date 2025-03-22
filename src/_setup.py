@@ -27,7 +27,7 @@ def initialize_mqtt_client(client_id, broker_config):
         port=broker_config.get("port", 1883),
         user=broker_config.get("username"),
         password=broker_config.get("password"),
-        keepalive=broker_config.get("keepalive", 60),
+        keepalive=broker_config.get("keepalive", 0),
         ssl=broker_config.get("ssl"),
     )
 
