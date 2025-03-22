@@ -17,9 +17,12 @@ def vfs_write(file_path, append, data, data_hash, data_hash_algo):
 
     root_dir = os.getcwd()
     file_root = path_parts[0]
+    if len(path_parts) == 1 or file_root in ["", "."]:
+        file_root = root_dir
+
     if file_root != root_dir:
         raise ValueError(
-            f"Invalid file path: {file_path}. Root directory must be {root_dir}."
+            f"Invalid file path: '{file_path}' - expected root dir to be '{root_dir} but is '{file_root}'"
         )
 
     path_parts = path_parts[1:]  # Skip the root directory
