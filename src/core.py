@@ -1,13 +1,10 @@
 from ssa import SSACore
 from ssa.interfaces import Serializer
 
-import json
 import asyncio
+from time import ticks_ms, ticks_diff, gmtime, mktime, sleep_ms
 
-from time import ticks_ms, ticks_diff
-
-
-RT_NAMESPACE = "umqtt_core"
+from .const import *
 
 
 class uMQTTCore(SSACore):
@@ -18,7 +15,13 @@ class uMQTTCore(SSACore):
     with support for SSA (Simple Service Architecture) pattern.
     """
 
-    def __init__(self, config_dir, fopen_mode="r", serializer: Serializer = json, **_):
+    def __init__(
+        self,
+        config_dir,
+        fopen_mode = DEFAULT_FOPEN_MODE,
+        serializer: Serializer = DEFAULT_SERIALIZER,
+        **_,
+    ):
         """
         Initialize the uMQTTCore with configuration and serialization parameters.
 
@@ -47,8 +50,7 @@ class uMQTTCore(SSACore):
         }
 
         self.is_registered = False
-
-        self.last_listen_time = ticks_ms()
+        self.last_publish_time = 0
 
     def _load_config(self):
         """
@@ -73,7 +75,8 @@ class uMQTTCore(SSACore):
         from machine import unique_id
         from binascii import hexlify
 
-        self._id = hexlify(unique_id()).decode("utf-8")
+        # Id to use as part of the MQTT topicss and client ID
+        self._id = hexlify(unique_id()).decode(MQTT_TOPIC_ENCODING)
 
     def _write_config(self, update_dict):
         """
@@ -106,8 +109,12 @@ class uMQTTCore(SSACore):
         """
         broker_config = self._config["runtime"]["broker"]
 
-        con_retries = self._config["runtime"]["connection"].get("retries", 3)
-        con_timeout_ms = self._config["runtime"]["connection"].get("timeout_ms", 1000)
+        con_retries = self._config["runtime"]["connection"].get(
+            "retries", DEFAULT_CON_RETRIES
+        )
+        con_timeout_ms = self._config["runtime"]["connection"].get(
+            "timeout_ms", DEFAULT_CON_TIMEOUT_MS
+        )
 
         from ._setup import initialize_mqtt_client, init_wlan
 
@@ -122,7 +129,10 @@ class uMQTTCore(SSACore):
             print(f"connected to `{ssid}` WLAN")
 
         def connect_mqtt():
-            self._mqtt.connect(broker_config.get("clean_session", True), con_timeout_ms)
+            self._mqtt.connect(
+                broker_config.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
+                con_timeout_ms,
+            )
             print(
                 f"connected to MQTT broker at {broker_config['hostname']}:{broker_config.get('port', 1883)}"
             )
@@ -143,7 +153,20 @@ class uMQTTCore(SSACore):
         self._mqtt.disconnect()
         self._wlan.disconnect()
 
-    def _listen(self, keep_alive=None, *_):
+    def _publish(self, topic, payload, retain, qos):
+        """
+        Publish a message to the MQTT broker.
+
+        Args:
+            topic: MQTT topic to publish to
+            payload: Message payload to send
+            retain: MQTT retain flag (default: False)
+            qos: MQTT QoS level (default: 0)
+        """
+        self._mqtt.publish(topic, payload, retain=retain, qos=qos)
+        self.last_publish_time = ticks_ms()
+
+    def _listen(self, *_):
         """
         Listen and handle incoming requests.
 
@@ -154,13 +177,12 @@ class uMQTTCore(SSACore):
 
         Interface: SSACore
         """
+
         self._mqtt.check_msg()
 
-        if keep_alive is not None:
-            keep_alive_thresh = keep_alive / 2
-            if ticks_diff(ticks_ms(), self.last_listen_time) > keep_alive_thresh:
-                self._mqtt.ping()
-                self.last_listen_time = ticks_ms()
+        if ticks_diff(ticks_ms(), self.last_publish_time) >= PING_TIMEOUT_MS:
+            self._mqtt.ping()
+            self.last_publish_time = ticks_ms()
 
     def _register_device(self):
         """
@@ -176,13 +198,21 @@ class uMQTTCore(SSACore):
             return
 
         registration_payload = self._serializer.dumps(self._config["tm"])
-        self._mqtt.publish(f"ssa/{self._id}/registration", registration_payload)
+        self._publish(
+            f"ssa/{self._id}/registration",
+            registration_payload,
+            REGISTRATION_RETAIN,
+            REGISTRATION_QOS,
+        )
 
         def on_registration(topic, payload):
-            topic = topic.decode("utf-8")
+            if self.is_registered:
+                return
+
+            topic = topic.decode(MQTT_TOPIC_ENCODING)
             payload = self._serializer.loads(payload)
 
-            #TODO: handle registration errors
+            # TODO: handle registration errors
             if topic != f"ssa/{self._id}/registration/ack":
                 raise ValueError(f"Unexpected registration topic: {topic}")
 
@@ -195,16 +225,11 @@ class uMQTTCore(SSACore):
             self.is_registered = True
 
         self._mqtt.set_callback(on_registration)
-        self._mqtt.subscribe(f"ssa/{self._id}/registration/ack")
+        self._mqtt.subscribe(f"ssa/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS)
 
-        from time import sleep_ms
-        keep_alive_ms = self._config["runtime"]["connection"].get("keepalive", 60) * 1000 # in ms
         while not self.is_registered:
-            try:
-                self._listen(keep_alive=keep_alive_ms)
-                sleep_ms(250)
-            except Exception as e:
-                print(f"Error listening on socket: {e}")
+            self._listen()
+            sleep_ms(POLLING_INTERVAL_MS)
 
     def _setup_mqtt(self):
         """
@@ -215,7 +240,7 @@ class uMQTTCore(SSACore):
         from ._setup import mqtt_setup
 
         def on_message(topic, payload):
-            topic = topic.decode("utf-8")
+            topic = topic.decode(MQTT_TOPIC_ENCODING)
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
@@ -236,7 +261,7 @@ class uMQTTCore(SSACore):
             mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
         )
 
-    def App(msg_polling_interval=250, config_dir="./config", **kwargs):
+    def App(polling_interval_ms=POLLING_INTERVAL_MS, config_dir="./config", **kwargs):
         """
         Decorator to mark the entry point for the SSACore.
 
@@ -244,9 +269,9 @@ class uMQTTCore(SSACore):
         the runtime environment.
 
         Args:
-            msg_polling_interval: Interval for message polling in milliseconds (default: 250)
+            polling_interval: Interval for message polling in milliseconds (default: 250)
             config_dir: Directory containing configuration files (default: "./config")
-            **kwargs: Additional arguments passed to uMQTTCore constructor
+            **kwargs: Additional arguments passed to uMQTTCore uctor
 
         Returns:
             Function decorator that wraps the main application entry point
@@ -255,7 +280,6 @@ class uMQTTCore(SSACore):
         """
         core = uMQTTCore(config_dir, **kwargs)
         core._load_config()
-        keep_alive_ms = core._config["runtime"]["connection"].get("keepalive", 0) * 1000
 
         def main_decorator(main_func):
             """
@@ -282,10 +306,10 @@ class uMQTTCore(SSACore):
                     main_func(core)
                     while True:
                         start_time = ticks_ms()
-                        core._listen(keep_alive=keep_alive_ms)
+                        core._listen()
                         elapsed_time = ticks_diff(ticks_ms(), start_time)
                         await core.task_sleep_ms(
-                            max(0, msg_polling_interval - elapsed_time)
+                            max(0, polling_interval_ms - elapsed_time)
                         )
 
                 core._start_scheduler(main_task())
@@ -345,7 +369,14 @@ class uMQTTCore(SSACore):
 
         return self._properties[property_name]
 
-    def set_property(self, property_name, value, retain=True, qos=0, **_):
+    def set_property(
+        self,
+        property_name,
+        value,
+        retain=PROPERTY_RETAIN,
+        qos=PROPERTY_QOS,
+        **_,
+    ):
         """
         Set the value of a property.
 
@@ -384,12 +415,19 @@ class uMQTTCore(SSACore):
         payload = self._serializer.dumps(value)
 
         try:
-            self._mqtt.publish(topic, payload, retain=retain, qos=qos)
+            self._publish(topic, payload, retain=retain, qos=qos)
         except Exception as e:
             # TODO: publish the error
             raise ValueError(f"Failed to set property {property_name}: {e}") from e
 
-    def emit_event(self, event_name, event_data, retain=False, qos=0, **_):
+    def emit_event(
+        self,
+        event_name,
+        event_data,
+        retain=EVENT_RETAIN,
+        qos=EVENT_QOS,
+        **_,
+    ):
         """
         Emit an event with the specified name and data.
 
@@ -408,7 +446,7 @@ class uMQTTCore(SSACore):
         namespace = self._config["tm"]["name"]
         topic = f"{self._base_event_topic}/{namespace}/{event_name}"
         payload = self._serializer.dumps(event_data)
-        self._mqtt.publish(topic, payload, retain=retain, qos=qos)
+        self._publish(topic, payload, retain=retain, qos=qos)
 
     def sync_executor(func):
         """
@@ -452,7 +490,9 @@ class uMQTTCore(SSACore):
 
         return wrapper
 
-    def register_action_executor(self, action_name, action_func, qos=0, **_):
+    def register_action_executor(
+        self, action_name, action_func, qos=ACTION_SUBSCRIPTION_QOS, **_
+    ):
         """
         Register a new action handler.
 
@@ -526,14 +566,17 @@ class uMQTTCore(SSACore):
         def builtin_action_wrapper(self, action_input):
             action_result = action_func(self, action_input)
 
-            from time import gmtime, mktime
-
             action_result.update(
-                {"timestamp": {"epoch_year": gmtime(0)[0], "seconds": mktime(gmtime())}}
+                {
+                    "timestamp": {
+                        "epoch_year": EPOCH_YEAR,
+                        "seconds": mktime(gmtime()),
+                    }
+                }
             )
 
             action_result = self._serializer.dumps(action_result)
-            self._mqtt.publish(
+            self._publish(
                 f"{self._base_event_topic}/{RT_NAMESPACE}/vfs/report",
                 action_result,
                 retain=False,
