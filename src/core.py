@@ -2,9 +2,11 @@ from ssa import SSACore
 from ssa.interfaces import Serializer
 
 import asyncio
-from time import ticks_ms, ticks_diff, gmtime, mktime, sleep_ms
+from time import ticks_ms, ticks_diff, sleep_ms
 
 from .const import *
+from ._log import LogLevels, LogLevel
+from ._utils import get_epoch_timestamp
 
 
 class uMQTTCore(SSACore):
@@ -18,7 +20,7 @@ class uMQTTCore(SSACore):
     def __init__(
         self,
         config_dir,
-        fopen_mode = DEFAULT_FOPEN_MODE,
+        fopen_mode=DEFAULT_FOPEN_MODE,
         serializer: Serializer = DEFAULT_SERIALIZER,
         **_,
     ):
@@ -49,7 +51,12 @@ class uMQTTCore(SSACore):
             "set_property": self._builtin_action_set_property,
         }
 
+        self._builtin_properties = {
+            "log_level": DEFAULT_LOG_LEVEL,
+        }
+
         self.is_registered = False
+        self._mqtt_ready = False
         self.last_publish_time = 0
 
     def _load_config(self):
@@ -66,6 +73,10 @@ class uMQTTCore(SSACore):
         self._config = load_configuration(
             self._config_dir, self._fopen_mode, self._serializer
         )
+
+        log_level = LogLevels.from_str(self._config.get("log_level"))
+        if log_level is None:
+            self.log_level = DEFAULT_LOG_LEVEL
 
         self._id = self._config.get("id")
         if self._id is not None:
@@ -126,15 +137,16 @@ class uMQTTCore(SSACore):
         def connect_wlan():
             if not self._wlan.isconnected():
                 raise Exception(f"connecting to `{ssid}` WLAN")
-            print(f"connected to `{ssid}` WLAN")
+            self.log(f"connected to `{ssid}` WLAN", LogLevels.INFO)
 
         def connect_mqtt():
             self._mqtt.connect(
                 broker_config.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
                 con_timeout_ms,
             )
-            print(
-                f"connected to MQTT broker at {broker_config['hostname']}:{broker_config.get('port', 1883)}"
+            self.log(
+                f"connected to MQTT broker at {broker_config['hostname']}",
+                LogLevels.INFO,
             )
 
         from ._utils import with_exponential_backoff
@@ -150,6 +162,7 @@ class uMQTTCore(SSACore):
 
         Interface: SSACore
         """
+        self._mqtt_ready = False
         self._mqtt.disconnect()
         self._wlan.disconnect()
 
@@ -165,6 +178,31 @@ class uMQTTCore(SSACore):
         """
         self._mqtt.publish(topic, payload, retain=retain, qos=qos)
         self.last_publish_time = ticks_ms()
+
+    def log(self, msg, level=DEFAULT_LOG_LEVEL):
+        if level not in LogLevels:
+            log(f"Invalid log level: {level}", "ERROR")
+
+        if level < self.log_level:
+            return
+
+        print(f"[{level}] {msg}")
+
+        if not self._mqtt_ready:
+            return
+
+        try:
+            self.emit_event(
+                "log",
+                {
+                    "level": str(level),
+                    "message": msg,
+                    "epoch_timestamp": get_epoch_timestamp(),
+                },
+                core_event=True,
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to emit log event: {e}")
 
     def _listen(self, *_):
         """
@@ -194,10 +232,11 @@ class uMQTTCore(SSACore):
         Interface: SSACore
         """
         if self.is_registered:
-            print(f"Device already registered with ID: {self._id}")
+            self.log(f"Device already registered with ID: {self._id}", LogLevels.INFO)
             return
 
         registration_payload = self._serializer.dumps(self._config["tm"])
+
         def on_registration(topic, payload):
             if self.is_registered:
                 return
@@ -205,12 +244,13 @@ class uMQTTCore(SSACore):
             topic = topic.decode(MQTT_TOPIC_ENCODING)
             payload = self._serializer.loads(payload)
 
-            # TODO: handle registration errors
             if topic != f"ssa/{self._id}/registration/ack":
-                raise ValueError(f"Unexpected registration topic: {topic}")
+                self.log(f"Unexpected registration topic: {topic}", LogLevels.WARN)
+                return
 
             if payload["status"] != "success":
-                raise ValueError(f"Failed to register device: {payload['message']}")
+                self.log(f"Failed to register device: {payload['message']}", LogLevels.ERROR)
+                return
 
             self._id = payload["id"]
             self._write_config({"id": self._id})
@@ -255,7 +295,7 @@ class uMQTTCore(SSACore):
                 try:
                     action_input = self._serializer.loads(payload)
                 except Exception as e:
-                    print(f"Failed to deserialize payload: {e}")
+                    self.log(f"Failed to deserialize payload: {e}", LogLevels.ERROR)
                     return
 
             self._invoke_action(namespace, action_name, action_input)
@@ -263,6 +303,8 @@ class uMQTTCore(SSACore):
         self._base_event_topic, self._base_action_topic, self._base_property_topic = (
             mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
         )
+        
+        self._mqtt_ready = True
 
     def App(polling_interval_ms=POLLING_INTERVAL_MS, config_dir="./config", **kwargs):
         """
@@ -305,8 +347,11 @@ class uMQTTCore(SSACore):
                 core._register_device()
                 core._setup_mqtt()
 
+                core.log("Connected to network. Initiating main task", LogLevels.INFO)
+
                 async def main_task():
                     main_func(core)
+                    core.log("User main completed. Entering main loop", LogLevels.DEBUG)
                     while True:
                         start_time = ticks_ms()
                         core._listen()
@@ -339,12 +384,10 @@ class uMQTTCore(SSACore):
         Interface: AffordanceHandler
         """
         if property_name in self._properties:
-            raise ValueError(
-                f"Property {property_name} already exists. Set a new value using 'set_property' method."
-            )
+            self.log(f"Property {property_name} already exists. Set a new value using 'set_property'", LogLevels.WARN)
+            return
 
         # TODO: sanitize property names
-
         if net_ro:
             self._net_ro_props.add(property_name)
         self._properties[property_name] = initial_value
@@ -366,9 +409,8 @@ class uMQTTCore(SSACore):
         Interface: AffordanceHandler
         """
         if property_name not in self._properties:
-            raise ValueError(
-                f"Property {property_name} does not exist. Create it using 'create_property' method."
-            )
+            self.log(f"Property {property_name} does not exist. Create it using 'create_property' method.", LogLevels.WARN)
+            return
 
         return self._properties[property_name]
 
@@ -376,6 +418,7 @@ class uMQTTCore(SSACore):
         self,
         property_name,
         value,
+        core_prop=False,
         retain=PROPERTY_RETAIN,
         qos=PROPERTY_QOS,
         **_,
@@ -398,35 +441,45 @@ class uMQTTCore(SSACore):
 
         Interface: AffordanceHandler
         """
-        if property_name not in self._properties:
-            raise ValueError(
-                f"Property {property_name} does not exist. Create it using 'create_property' method."
-            )
 
-        if not isinstance(value, type(self._properties[property_name])):
-            raise ValueError(
-                f"Value of property '{property_name}' must be of type {type(self._properties[property_name]).__name__}"
-            )
+        map = None
+        namespace = None
+
+        if core_prop and property_name in self._builtin_properties:
+            map = self._builtin_properties
+            namespace = RT_NAMESPACE
+        if not core_prop and property_name in self._properties:
+            map = self._properties
+            namespace = self._config["tm"]["name"]
+
+        if map is None or namespace is None:
+            # TODO: Log the error
+            self.log(f"Property {namespace}/{property_name} does not exist.", LogLevels.WARN)
+            return
+
+        if not isinstance(value, type(map[property_name])):
+            # TODO: Log the error
+            self.log(f"Value of property '{namespace}/{property_name}' must be of type {type(map[property_name]).__name__}", LogLevels.ERROR)
+            return
 
         if isinstance(value, dict):
-            self._properties[property_name].update(value)
+            map[property_name].update(value)
         else:
-            self._properties[property_name] = value
+            map[property_name] = value
 
-        namespace = self._config["tm"]["name"]
         topic = f"{self._base_property_topic}/{namespace}/{property_name}"
         payload = self._serializer.dumps(value)
 
         try:
             self._publish(topic, payload, retain=retain, qos=qos)
         except Exception as e:
-            # TODO: publish the error
-            raise ValueError(f"Failed to set property {property_name}: {e}") from e
+            self.log(f"Failed to publish property update: {e}", LogLevels.ERROR)
 
     def emit_event(
         self,
         event_name,
         event_data,
+        core_event=False,
         retain=EVENT_RETAIN,
         qos=EVENT_QOS,
         **_,
@@ -446,7 +499,7 @@ class uMQTTCore(SSACore):
         Interface: AffordanceHandler
         """
         # TODO: sanitize event names
-        namespace = self._config["tm"]["name"]
+        namespace = RT_NAMESPACE if core_event else self._config["tm"]["name"]
         topic = f"{self._base_event_topic}/{namespace}/{event_name}"
         payload = self._serializer.dumps(event_data)
         self._publish(topic, payload, retain=retain, qos=qos)
@@ -514,7 +567,7 @@ class uMQTTCore(SSACore):
         Interface: AffordanceHandler
         """
         if action_name in self._actions:
-            raise ValueError(f"Action {action_name} already exists.")
+            self.log(f"Action {action_name} already exists.", LogLevels.WARN)
 
         # TODO: sanitize action names
         self._actions[action_name] = action_func
@@ -549,8 +602,9 @@ class uMQTTCore(SSACore):
             asyncio.create_task(self._actions[action_name](self, action_input))
 
         else:
-            raise ValueError(
-                f"Action handler for {namespace}/{action_name} does not exist."
+            self.log(
+                f"Action handler for {namespace}/{action_name} does not exist.",
+                LogLevels.WARN,
             )
 
     def _wrap_vfs_action(action_func):
@@ -568,16 +622,7 @@ class uMQTTCore(SSACore):
 
         def builtin_action_wrapper(self, action_input):
             action_result = action_func(self, action_input)
-
-            action_result.update(
-                {
-                    "timestamp": {
-                        "epoch_year": EPOCH_YEAR,
-                        "seconds": mktime(gmtime()),
-                    }
-                }
-            )
-
+            action_result.update({"epoch_timestamp": get_epoch_timestamp()})
             action_result = self._serializer.dumps(action_result)
             self._publish(
                 f"{self._base_event_topic}/{RT_NAMESPACE}/vfs/report",
@@ -713,12 +758,15 @@ class uMQTTCore(SSACore):
         property_name = action_input.get("property")
         property_value = action_input.get("value")
         if property_name is None or property_value is None:
-            raise ValueError(
-                "Malformed action input. Input template: {'property': 'name_string', 'value': Any}"
+            self.log(
+                "Malformed set_property action input. Input template: {'property': 'name_string', 'value': Any}",
+                LogLevels.ERROR,
             )
+            return
 
         if property_name in self._net_ro_props:
-            raise ValueError(f"Property {property_name} is read-only.")
+            self.log(f"Property {property_name} is read-only.", LogLevels.WARN)
+            return
 
         self.set_property(property_name, property_value)
 
@@ -737,11 +785,11 @@ class uMQTTCore(SSACore):
         try:
             self._disconnect()
         except Exception as e:
-            print(f"Failed to disconnect: {e}")
+            self.log(f"Failed to disconnect: {e}", LogLevels.ERROR)
 
         from machine import soft_reset
 
-        print("Reloading core module...")
+        self.log("Reloading core module...", LogLevels.WARN)
         soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
@@ -774,22 +822,27 @@ class uMQTTCore(SSACore):
 
             # TODO: (try to) publish the error as an event
             if isinstance(msg, asyncio.CancelledError):
-                print(f"{future} '{future_name}' was cancelled.")
+                self.log(f"{future} '{future_name}' was cancelled.", LogLevels.INFO)
             elif isinstance(msg, Exception):
-                print(f"Generic exception in {future} '{future_name}': {msg}")
-                # TODO: publish the error
+                self.log(
+                    f"Generic exception in {future} '{future_name}': {msg}",
+                    LogLevels.ERROR,
+                )
             else:
-                print(f"Unknown exception in {future} '{future_name}': {msg}")
+                self.log(
+                    f"Unknown exception in {future} '{future_name}': {msg}",
+                    LogLevels.WARN,
+                )
 
             for task_id in self._tasks:
                 if self._tasks[task_id].done():
                     del self._tasks[task_id]
 
-        print("Starting task scheduler...")
+        self.log("Starting task scheduler...", LogLevels.DEBUG)
         loop = asyncio.new_event_loop()
         loop.set_exception_handler(loop_exception_handler)
 
-        print("Executing main task...")
+        self.log("Running main task...", LogLevels.DEBUG)
         loop.run_until_complete(loop.create_task(main_task))
 
     def task_create(self, task_id, task_func, period_ms=0):
@@ -816,16 +869,17 @@ class uMQTTCore(SSACore):
               an unhandled exception.
         """
         if task_id in self._tasks:
-            raise ValueError(f"Task {task_id} already exists.")
+            self.log(f"Task {task_id} already exists.", LogLevels.WARN)
+            return
 
         async def try_wrapper():
             try:
                 await task_func(self)
             except asyncio.CancelledError:
-                print(f"Task {task_id} was cancelled.")
+                self.log(f"Task {task_id} was cancelled.", LogLevels.INFO)
                 return True
             except Exception as e:
-                print(f"Error in task {task_id}: {e}")
+                self.log(f"Task {task_id} failed: {e}", LogLevels.ERROR)
                 return True
 
             return False

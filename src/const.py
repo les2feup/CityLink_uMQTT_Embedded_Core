@@ -2,11 +2,14 @@ from micropython import const
 from time import gmtime
 import json
 
-RT_NAMESPACE = const("umqtt_core")
+from ._log import LogLevels
 
+DEFAULT_LOG_LEVEL = LogLevels.INFO
+
+RT_NAMESPACE = const("umqtt_core")
 PING_TIMEOUT_MS = const(60000)
-REGISTRATION_PUBLISH_INTERVAL_MS = const(5000) # 5 seconds
-POLLING_INTERVAL_MS = const(500) # 0.5 seconds
+REGISTRATION_PUBLISH_INTERVAL_MS = const(5000)  # 5 seconds
+POLLING_INTERVAL_MS = const(500)  # 0.5 seconds
 
 MQTT_TOPIC_ENCODING = const("utf-8")
 DEFAULT_MQTT_PORT = const(1883)

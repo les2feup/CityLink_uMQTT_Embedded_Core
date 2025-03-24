@@ -32,3 +32,12 @@ def with_exponential_backoff(func, retries, base_timeout_ms):
             sleep_ms(retry_timeout)
 
     raise Exception(f"[ERROR] {func.__name__} failed after {retries} retries")
+
+
+def get_epoch_timestamp():
+    from time import gmtime, time
+
+    if gmtime(0)[0] != 1970:
+        return {"time_base": gmtime(0)[0], "timestamp": time()}
+
+    return {"timestamp": time()}
