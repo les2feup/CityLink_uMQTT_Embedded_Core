@@ -204,7 +204,7 @@ class uMQTTCore(SSACore):
         except Exception as e:
             print(f"[ERROR] Failed to emit log event: {e}")
 
-    def _listen(self, *_):
+    def _listen(self):
         """
         Listen and handle incoming requests.
 
