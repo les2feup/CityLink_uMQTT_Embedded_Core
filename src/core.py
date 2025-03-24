@@ -198,13 +198,6 @@ class uMQTTCore(SSACore):
             return
 
         registration_payload = self._serializer.dumps(self._config["tm"])
-        self._publish(
-            f"ssa/{self._id}/registration",
-            registration_payload,
-            REGISTRATION_RETAIN,
-            REGISTRATION_QOS,
-        )
-
         def on_registration(topic, payload):
             if self.is_registered:
                 return
@@ -227,9 +220,19 @@ class uMQTTCore(SSACore):
         self._mqtt.set_callback(on_registration)
         self._mqtt.subscribe(f"ssa/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS)
 
+        time_passed = 0
         while not self.is_registered:
+            if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
+                self._publish(
+                    f"ssa/{self._id}/registration",
+                    registration_payload,
+                    retain=False,
+                    qos=1,
+                )
+
             self._listen()
             sleep_ms(POLLING_INTERVAL_MS)
+            time_passed += POLLING_INTERVAL_MS
 
     def _setup_mqtt(self):
         """
