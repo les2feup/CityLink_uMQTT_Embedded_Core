@@ -36,6 +36,7 @@ def _validate_configuration(config):
     configuration_template = {
         "tm": {
             "name": str,
+            "href": str,
             "version": {
                 "model": str,
                 "instance": str,
