@@ -1,0 +1,33 @@
+{
+    "@context": "https://www.w3.org/2022/wot/td/v1.1",
+    "@type": "tm:ThingModel",
+    "title": "Simple Temperature Sensor",
+    "links": [
+        {
+            "rel": "tm:extends",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/EmbeddedCore/ports/micropython/examples/etfa2025/temperature.tm.json",
+            "type": "application/tm+json"
+        }
+    ],
+    "properties": {
+        "temperature": {
+            "forms": [
+                {}
+            ]
+        }
+    },
+    "events": {
+        "overheating": {
+            "forms": [
+                {}
+            ]
+        }
+    },
+    "actions": {
+        "toggleAlarm": {
+            "forms": [
+                {}
+            ]
+        }
+    }
+}
