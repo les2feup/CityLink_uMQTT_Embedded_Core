@@ -1,17 +1,16 @@
 """
-This is a simple SSA application that simulates a sensor that generates random values.
+This is a simple application that simulates a sensor that generates random values.
 The sensor value is then sent to different topics based on the priority of the sensor.
 The priority of the sensor is set by the user and can be "low", "medium", or "high".
 Setting the priority is handled by the user through the SSA HAL API (topic is mqtt://{...}/actions/ssa_hal/set/priority)
 """
 
-from ssa_core import SSACore
-
+from citylink import EmbeddedCore
 from random import randint
 
 
-@SSACore.sync_executor
-def simulate_random_sensor(ssa: SSACore) -> None:
+@EmbeddedCore.sync_executor
+def simulate_random_sensor(ssa: EmbeddedCore) -> None:
     """
     Simulate a sensor reading and trigger a corresponding event.
 
@@ -27,8 +26,8 @@ def simulate_random_sensor(ssa: SSACore) -> None:
     )  # "low_prio", "medium_prio", "high_prio"
 
 
-@SSACore.App()
-def main(ssa: SSACore):
+@EmbeddedCore.App()
+def main(ssa: EmbeddedCore):
     """
     Initializes the sensor simulation application.
 

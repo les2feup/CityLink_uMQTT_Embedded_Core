@@ -2,31 +2,71 @@
     "@context": "https://www.w3.org/2022/wot/td/v1.1",
     "@type": "tm:ThingModel",
     "title": "Simple Temperature Sensor",
+    "description": "A simple temperature sensor that monitors the temperature and triggers an alarm if it exceeds a certain threshold. ETFA 2025 example.",
     "links": [
         {
             "rel": "tm:extends",
             "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/EmbeddedCore/ports/micropython/examples/etfa2025/temperature.tm.json",
             "type": "application/tm+json"
+        },
+        {
+            "rel": "tm:submodel",
+            "href": "",
+            "type": "text/x-python",
+            "instanceName": "platform"
+        },
+        {
+            "rel": "tm:submodel",
+            "href": "",
+            "type": "text/x-python",
+            "instanceName": "EmbeddedCore"
         }
     ],
     "properties": {
         "temperature": {
             "forms": [
-                {}
+                {
+                    "href": "{{CITYLINK_HREF_BASE}}",
+                    "mqv:filter": "{{CITYLINK_PROPERTY_NAME}}/temperature",
+                    "op": [
+                        "readproperty",
+                        "observeproperty",
+                        "unobserveproperty"
+                    ],
+                    "mqv:qos": 0,
+                    "mqv:retain": true
+                }
             ]
         }
     },
     "events": {
         "overheating": {
             "forms": [
-                {}
+                {
+                    "href": "{{CITYLINK_HREF_BASE}}",
+                    "mqv:filter": "{{CITYLINK_EVENT_NAME}}/overheating",
+                    "op": [
+                        "subscribeevent",
+                        "unsubscribeevent"
+                    ],
+                    "mqv:qos": 0,
+                    "mqv:retain": false
+                }
             ]
         }
     },
     "actions": {
         "toggleAlarm": {
             "forms": [
-                {}
+                {
+                    "href": "{{CITYLINK_HREF_BASE}}",
+                    "mqv:filter": "{{CITYLINK_ACTION_NAME}}/toggleAlarm",
+                    "op": [
+                        "invokeaction"
+                    ],
+                    "mqv:qos": 1,
+                    "mqv:retain": false
+                }
             ]
         }
     }

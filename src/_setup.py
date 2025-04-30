@@ -10,7 +10,7 @@ from .const import (
 
 def mqtt_setup(client_id, rt_namespace, mqtt_client, on_message):
 
-    base_topic = f"ssa/{client_id}"
+    base_topic = f"citylink/{client_id}"
     base_event_topic = f"{base_topic}/events"
     base_action_topic = f"{base_topic}/actions"
     base_property_topic = f"{base_topic}/properties"

@@ -1,3 +1,3 @@
-from .core import uMQTTCore as SSACore
+from .core import uMQTTCore as EmbeddedCore
 
-__all__ = ["SSACore"]
+__all__ = ["EmbeddedCore"]

@@ -1,4 +1,4 @@
-from ssa import SSACore
+from ssa import EmbeddedCore
 from ssa.interfaces import Serializer
 
 import asyncio
@@ -9,12 +9,10 @@ from ._log import LogLevels, LogLevel
 from ._utils import get_epoch_timestamp
 
 
-class uMQTTCore(SSACore):
+class uMQTTCore(EmbeddedCore):
     """
-    MQTT-based implementation of the SSA Core for MicroPython.
-
-    This class provides a lightweight MQTT client for IoT devices running MicroPython,
-    with support for SSA (Simple Service Architecture) pattern.
+    Micropython implementation of the CityLink EmbeddedCore interface
+    using MQTT over a WLAN.
     """
 
     def __init__(
@@ -66,7 +64,7 @@ class uMQTTCore(SSACore):
         Loads configuration files from the specified directory and sets up
         the device ID. If no ID exists, generates one from the device's unique ID.
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
         from ._config import load_configuration
 
@@ -99,7 +97,7 @@ class uMQTTCore(SSACore):
         Args:
             update_dict: Dictionary containing configuration updates
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
         self._config.update(update_dict)
 
@@ -111,12 +109,14 @@ class uMQTTCore(SSACore):
 
     def _connect(self):
         """
-        Attempt to connect to the Edge Node's SSA IoT Connector.
+        Attempt to connect to the Edge Connector.
+        In this concrete implementation, this function connects to the WLAN network
+        and then to the MQTT Broker.
 
         Establishes connections to the configured WiFi network and MQTT broker
         with exponential backoff for retries.
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
         broker_config = self._config["runtime"]["broker"]
 
@@ -160,7 +160,7 @@ class uMQTTCore(SSACore):
 
         Terminates MQTT broker connection and disconnects from WiFi network.
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
         self._mqtt_ready = False
         self._mqtt.disconnect()
@@ -213,7 +213,7 @@ class uMQTTCore(SSACore):
         Args:
             *_: Variable arguments (ignored)
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
 
         self._mqtt.check_msg()
@@ -229,7 +229,7 @@ class uMQTTCore(SSACore):
         Sends registration request to the WoT servient and waits for confirmation.
         If already registered, skips the registration process.
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
         if self.is_registered:
             self.log(f"Device already registered with ID: {self._id}", LogLevels.INFO)
@@ -244,7 +244,7 @@ class uMQTTCore(SSACore):
             topic = topic.decode(MQTT_TOPIC_ENCODING)
             payload = self._serializer.loads(payload)
 
-            if topic != f"ssa/{self._id}/registration/ack":
+            if topic != f"citylink/{self._id}/registration/ack":
                 self.log(f"Unexpected registration topic: {topic}", LogLevels.WARN)
                 return
 
@@ -258,13 +258,13 @@ class uMQTTCore(SSACore):
             self.is_registered = True
 
         self._mqtt.set_callback(on_registration)
-        self._mqtt.subscribe(f"ssa/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS)
+        self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS)
 
         time_passed = 0
         while not self.is_registered:
             if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
                 self._publish(
-                    f"ssa/{self._id}/registration",
+                    f"citylink/{self._id}/registration",
                     registration_payload,
                     retain=False,
                     qos=1,
@@ -308,7 +308,7 @@ class uMQTTCore(SSACore):
 
     def App(polling_interval_ms=POLLING_INTERVAL_MS, config_dir="./config", **kwargs):
         """
-        Decorator to mark the entry point for the SSACore.
+        Decorator to mark the entry point for the EmbeddedCore.
 
         Creates a uMQTTCore instance, loads configuration, and sets up
         the runtime environment.
@@ -321,14 +321,14 @@ class uMQTTCore(SSACore):
         Returns:
             Function decorator that wraps the main application entry point
 
-        Interface: SSACore
+        Interface: EmbeddedCore
         """
         core = uMQTTCore(config_dir, **kwargs)
         core._load_config()
 
         def main_decorator(main_func):
             """
-            Decorates the main function of the SSACore.
+            Decorates the main function of the EmbeddedCore.
 
             Args:
                 main_func: The main function to be decorated
@@ -339,7 +339,7 @@ class uMQTTCore(SSACore):
 
             def main_wrapper():
                 """
-                Wrapper for the main function of the SSACore.
+                Wrapper for the main function of the EmbeddedCore.
 
                 Handles connection, registration, MQTT setup, and scheduler launch.
                 """
