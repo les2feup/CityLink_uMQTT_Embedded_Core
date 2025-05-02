@@ -2,7 +2,7 @@
 This is a simple application that simulates a sensor that generates random values.
 The sensor value is then sent to different topics based on the priority of the sensor.
 The priority of the sensor is set by the user and can be "low", "medium", or "high".
-Setting the priority is handled by the user through the SSA HAL API (topic is mqtt://{...}/actions/ssa_hal/set/priority)
+Setting the priority is handled by the user through the CityLink Embedded Core API (topic is mqtt://{...}/actions/setPriority)
 """
 
 from citylink import EmbeddedCore
@@ -15,7 +15,7 @@ def simulate_random_sensor(ssa: EmbeddedCore) -> None:
     Simulate a sensor reading and trigger a corresponding event.
 
     This asynchronous function generates a random integer between 0 and 100 to represent a sensor value.
-    It retrieves the current priority level from the SSA properties and triggers an event on the topic
+    It retrieves the current priority level from the properties dictionary and triggers an event on the topic
     formatted as 'sensor_value/<priority>_prio', where <priority> may be 'low', 'medium', or 'high'.
     """
 
