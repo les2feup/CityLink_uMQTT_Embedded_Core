@@ -755,11 +755,11 @@ class uMQTTCore(EmbeddedCore):
 
         Interface: AffordanceHandler
         """
-        property_name = action_input.get("property")
-        property_value = action_input.get("value")
+        property_name = action_input.get("pname")
+        property_value = action_input.get("pval")
         if property_name is None or property_value is None:
             self.log(
-                "Malformed set_property action input. Input template: {'property': 'name_string', 'value': Any}",
+                "Malformed set_property action input. Input template: {'pname': 'name_string', 'pval': Any}",
                 LogLevels.ERROR,
             )
             return
