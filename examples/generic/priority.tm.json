@@ -13,13 +13,13 @@
             "rel": "tm:submodel",
             "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/ThingModels/platform/rpi_pico_w.tm.json",
             "type": "application/tm+json",
-            "instanceName": "Platform"
+            "instanceName": "citylink:platform"
         },
         {
             "rel": "tm:extends",
             "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/ThingModels/embeddedCore/mqtt_micropython_core.tm.json",
             "type": "application/tm+json",
-            "instanceName": "EmbeddedCore"
+            "instanceName": "citylink:embeddedCore"
         }
     ],
     "properties": {
@@ -40,8 +40,8 @@
             "observable": true,
             "forms": [
                 {
-                    "href": "{{CITYLINK_HREF_BASE}}",
-                    "mqv:filter": "{{CITYLINK_PROPERTY_NAME}}/priority",
+                    "href": "{{CITYLINK_HREF}}",
+                    "mqv:filter": "{{CITYLINK_PROPERTY}}/priority",
                     "op": [
                         "readproperty",
                         "observeproperty",
@@ -73,8 +73,8 @@
             },
             "forms": [
                 {
-                    "href": "{{CITYLINK_HREF_BASE}}",
-                    "mqv:filter": "{{CITYLINK_EVENT_NAME}}/sensor_value/{priority}_prio",
+                    "href": "{{CITYLINK_HREF}}",
+                    "mqv:filter": "{{CITYLINK_EVENT}}/sensor_value/{priority}_prio",
                     "op": [
                         "subscribeevent",
                         "unsubscribeevent"
