@@ -11,14 +11,14 @@
         },
         {
             "rel": "tm:submodel",
-            "href": "",
-            "type": "text/x-python",
-            "instanceName": "platform"
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/ThingModels/platform/rpi_pico_w.tm.json",
+            "type": "application/tm+json",
+            "instanceName": "Platform"
         },
         {
             "rel": "tm:submodel",
-            "href": "",
-            "type": "text/x-python",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/ThingModels/embeddedCore/mqtt_micropython_core.tm.json",
+            "type": "application/tm+json",
             "instanceName": "EmbeddedCore"
         }
     ],
