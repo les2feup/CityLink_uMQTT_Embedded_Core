@@ -3,6 +3,9 @@
     "@type": "tm:ThingModel",
     "title": "PrioritySensor",
     "description": "A simple sensor that publishes readings on different topics based on a priority level.",
+    "version": {
+        "model": "0.1.0"
+    },
     "links": [
         {
             "rel": "describes",

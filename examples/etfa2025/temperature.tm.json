@@ -3,6 +3,9 @@
     "@type": "tm:ThingModel",
     "title": "Simple Temperature Sensor",
     "description": "A simple temperature sensor that monitors the temperature and triggers an alarm if it exceeds a certain threshold. ETFA 2025 example.",
+    "version": {
+        "model": "0.1.0"
+    },
     "links": [
         {
             "rel": "tm:extends",
