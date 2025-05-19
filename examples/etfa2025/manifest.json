@@ -10,7 +10,7 @@
     "wot": {
         "tm": {
             "title": "Temperature Sensor",
-            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/main/examples/etfa2025/temperature.tm.json",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/etfa2025/temperature.tm.json",
             "version": {
                 "instance": "0.1.0",
                 "model": "0.1.0"

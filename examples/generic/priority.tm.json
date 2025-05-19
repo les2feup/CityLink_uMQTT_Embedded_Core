@@ -9,7 +9,7 @@
     "links": [
         {
             "rel": "describes",
-            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/main/examples/generic/priority.py",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/generic/priority.py",
             "type": "text/x-python"
         },
         {
