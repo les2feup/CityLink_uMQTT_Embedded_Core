@@ -1,0 +1,20 @@
+{
+    "download": [
+        {
+            "filename": "main.py",
+            "url": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/EmbeddedCore/ports/micropython/examples/etfa2025/temperature.py",
+            "contentType": "text",
+            "sha256": "0764fbfc327f54409ae01db7e3364cbe9cd7a2985b779cf488915a6341bb877a"
+        }
+    ],
+    "wot": {
+        "tm": {
+            "title": "Temperature Sensor",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/main/examples/etfa2025/temperature.tm.json",
+            "version": {
+                "instance": "0.1.0",
+                "model": "0.1.0"
+            }
+        }
+    }
+}

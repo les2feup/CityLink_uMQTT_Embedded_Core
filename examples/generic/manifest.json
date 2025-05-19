@@ -1,0 +1,20 @@
+{
+    "download": [
+        {
+            "filename": "main.py",
+            "url": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/main/examples/generic/priority.py",
+            "contentType": "text",
+            "sha256": "4a47100cc3885fb5348c15c0a605620eb147f1fe702bbe0772f82212c723734b"
+        }
+    ],
+    "wot": {
+        "tm": {
+            "title": "Temperature Sensor",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/main/examples/generic/priority.tm.json",
+            "version": {
+                "instance": "0.1.0",
+                "model": "0.1.0"
+            }
+        }
+    }
+}
