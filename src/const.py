@@ -4,8 +4,9 @@ import json
 
 from ._log import LogLevels
 
-DEFAULT_LOG_LEVEL = LogLevels.INFO
+DEFAULT_LOG_LEVEL = LogLevels.TRACE
 
+APP_NAMESPACE = const("app")
 RT_NAMESPACE = const("umqtt_core")
 PING_TIMEOUT_MS = const(60000)
 REGISTRATION_PUBLISH_INTERVAL_MS = const(5000)  # 5 seconds

@@ -181,7 +181,7 @@ class uMQTTCore(EmbeddedCore):
 
     def log(self, msg, level=DEFAULT_LOG_LEVEL):
         if level not in LogLevels:
-            log(f"Invalid log level: {level}", "ERROR")
+            log(f"Invalid log level: {level}", LogLevels.ERROR)
 
         if level < self.log_level:
             return
@@ -231,38 +231,61 @@ class uMQTTCore(EmbeddedCore):
 
         Interface: EmbeddedCore
         """
+        self.log("Inside register_device()", LogLevels.DEBUG)
+
         if self.is_registered:
             self.log(f"Device already registered with ID: {self._id}", LogLevels.INFO)
             return
 
-        registration_payload = self._serializer.dumps(self._config["tm"])
+        registration_payload = self._serializer.dumps(self._config["reg"])
+        self.log(f"Registration payload: {registration_payload}", LogLevels.DEBUG)
+        registering = False
 
         def on_registration(topic, payload):
-            if self.is_registered:
+            nonlocal registering
+
+            if self.is_registered or registering:
                 return
+
+            registering = True
 
             topic = topic.decode(MQTT_TOPIC_ENCODING)
             payload = self._serializer.loads(payload)
+            self.log(f"Received registration ack: {payload}", LogLevels.DEBUG)
 
             if topic != f"citylink/{self._id}/registration/ack":
                 self.log(f"Unexpected registration topic: {topic}", LogLevels.WARN)
+                registering = False
                 return
 
             if payload["status"] != "success":
-                self.log(f"Failed to register device: {payload['message']}", LogLevels.ERROR)
+                #//TODO: handle better the schema validation
+                self.log(
+                    f"Failed to register device: {payload['message']}", LogLevels.ERROR
+                )
+                registering = False
                 return
 
             self._id = payload["id"]
+            self.log(
+                f"Device registered successfully with ID: {self._id}", LogLevels.INFO
+            )
             self._write_config({"id": self._id})
-
+            self.log(f"Device ID written to config", LogLevels.DEBUG)
             self.is_registered = True
 
+        self.log("Registering device...", LogLevels.INFO)
         self._mqtt.set_callback(on_registration)
-        self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS)
+        self.log("Subscribing to registration ack topic...", LogLevels.DEBUG)
+        self._mqtt.subscribe(
+            f"citylink/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS
+        )
 
+        self.log("Waiting for registration ack...", LogLevels.DEBUG)
         time_passed = 0
-        while not self.is_registered:
+        while not self.is_registered and not registering:
             if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
+                self.log("Publishing registration message", LogLevels.DEBUG)
                 self._publish(
                     f"citylink/{self._id}/registration",
                     registration_payload,
@@ -303,7 +326,7 @@ class uMQTTCore(EmbeddedCore):
         self._base_event_topic, self._base_action_topic, self._base_property_topic = (
             mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
         )
-        
+
         self._mqtt_ready = True
 
     def App(polling_interval_ms=POLLING_INTERVAL_MS, config_dir="./config", **kwargs):
@@ -384,7 +407,10 @@ class uMQTTCore(EmbeddedCore):
         Interface: AffordanceHandler
         """
         if property_name in self._properties:
-            self.log(f"Property {property_name} already exists. Set a new value using 'set_property'", LogLevels.WARN)
+            self.log(
+                f"Property {property_name} already exists. Set a new value using 'set_property'",
+                LogLevels.WARN,
+            )
             return
 
         # TODO: sanitize property names
@@ -409,7 +435,10 @@ class uMQTTCore(EmbeddedCore):
         Interface: AffordanceHandler
         """
         if property_name not in self._properties:
-            self.log(f"Property {property_name} does not exist. Create it using 'create_property' method.", LogLevels.WARN)
+            self.log(
+                f"Property {property_name} does not exist. Create it using 'create_property' method.",
+                LogLevels.WARN,
+            )
             return
 
         return self._properties[property_name]
@@ -450,16 +479,19 @@ class uMQTTCore(EmbeddedCore):
             namespace = RT_NAMESPACE
         if not core_prop and property_name in self._properties:
             map = self._properties
-            namespace = self._config["tm"]["name"]
+            namespace = APP_NAMESPACE
 
         if map is None or namespace is None:
             # TODO: Log the error
-            self.log(f"Property {namespace}/{property_name} does not exist.", LogLevels.WARN)
+            self.log(f"Property {property_name} does not exist.", LogLevels.WARN)
             return
 
         if not isinstance(value, type(map[property_name])):
             # TODO: Log the error
-            self.log(f"Value of property '{namespace}/{property_name}' must be of type {type(map[property_name]).__name__}", LogLevels.ERROR)
+            self.log(
+                f"Value of property '{namespace}/{property_name}' must be of type {type(map[property_name]).__name__}",
+                LogLevels.ERROR,
+            )
             return
 
         if isinstance(value, dict):
@@ -499,7 +531,7 @@ class uMQTTCore(EmbeddedCore):
         Interface: AffordanceHandler
         """
         # TODO: sanitize event names
-        namespace = RT_NAMESPACE if core_event else self._config["tm"]["name"]
+        namespace = RT_NAMESPACE if core_event else APP_NAMESPACE
         topic = f"{self._base_event_topic}/{namespace}/{event_name}"
         payload = self._serializer.dumps(event_data)
         self._publish(topic, payload, retain=retain, qos=qos)
@@ -572,9 +604,9 @@ class uMQTTCore(EmbeddedCore):
         # TODO: sanitize action names
         self._actions[action_name] = action_func
 
-        namespace = self._config["tm"]["name"]
+        # TODO: get rid of / refactor the namespace stuff
         self._mqtt.subscribe(
-            f"{self._base_action_topic}/{namespace}/{action_name}", qos=qos
+            f"{self._base_action_topic}/{APP_NAMESPACE}/{action_name}", qos=qos
         )
 
     def _invoke_action(self, namespace, action_name, action_input, **_):
@@ -598,7 +630,7 @@ class uMQTTCore(EmbeddedCore):
         if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
             asyncio.create_task(self._builtin_actions[action_name](action_input))
 
-        elif namespace == self._config["tm"]["name"] and action_name in self._actions:
+        elif action_name in self._actions:
             asyncio.create_task(self._actions[action_name](self, action_input))
 
         else:

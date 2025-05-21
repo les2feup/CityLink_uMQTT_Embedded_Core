@@ -5,7 +5,7 @@ The priority of the sensor is set by the user and can be "low", "medium", or "hi
 Setting the priority is handled by the user through the CityLink Embedded Core API (topic is mqtt://{...}/actions/setPriority)
 """
 
-from citylink import EmbeddedCore
+from citylink_core import EmbeddedCore
 from random import randint
 
 

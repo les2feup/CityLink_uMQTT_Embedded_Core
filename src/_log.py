@@ -29,15 +29,11 @@ class LogLevels:
 
     @classmethod
     def __iter__(cls):
-        return iter(
-            [cls.TRACE, cls.DEBUG, cls.INFO, cls.WARN, cls.ERROR, cls.FATAL]
-        )
+        return iter([cls.TRACE, cls.DEBUG, cls.INFO, cls.WARN, cls.ERROR, cls.FATAL])
 
     @classmethod
     def __getitem__(cls, item):
-        return [cls.TRACE, cls.DEBUG, cls.INFO, cls.WARN, cls.ERROR, cls.FATAL][
-            item
-        ]
+        return [cls.TRACE, cls.DEBUG, cls.INFO, cls.WARN, cls.ERROR, cls.FATAL][item]
 
     @classmethod
     def __len__(cls):

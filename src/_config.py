@@ -81,6 +81,7 @@ def load_configuration(config_dir, config_open_mode, serializer):
 def write_configuration(config, config_dir, config_open_mode, serializer):
     import os
 
+    # TODO: check if the directory exists
     root_dir = os.getcwd()
     if root_dir != config_dir:
         os.chdir(config_dir)
