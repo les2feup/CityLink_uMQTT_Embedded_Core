@@ -34,13 +34,8 @@ def _check_template(template, provided, path="config"):
 
 def _validate_configuration(config):
     configuration_template = {
-        "tm": {
-            "name": str,
-            "href": str,
-            "version": {
-                "model": str,
-                "instance": str,
-            },
+        "reg": {
+            "manifest": str,
         },
         "network": {
             "ssid": str,
