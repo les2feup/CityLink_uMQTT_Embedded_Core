@@ -10,7 +10,7 @@ from random import randint
 
 
 @EmbeddedCore.sync_executor
-def simulate_random_sensor(ssa: EmbeddedCore) -> None:
+def simulate_random_sensor(citylink: EmbeddedCore) -> None:
     """
     Simulate a sensor reading and trigger a corresponding event.
 
@@ -20,14 +20,14 @@ def simulate_random_sensor(ssa: EmbeddedCore) -> None:
     """
 
     sensor_value = randint(0, 100)
-    priority = ssa.get_property("priority")
-    ssa.emit_event(
+    priority = citylink.get_property("priority")
+    citylink.emit_event(
         f"sensor_value/{priority}_prio", sensor_value
     )  # "low_prio", "medium_prio", "high_prio"
 
 
 @EmbeddedCore.App()
-def main(ssa: EmbeddedCore):
+def main(citylink: EmbeddedCore):
     """
     Initializes the sensor simulation application.
 
@@ -35,5 +35,5 @@ def main(ssa: EmbeddedCore):
     simulation task to generate sensor values. Valid priority values include
     "low", "medium", and "high".
     """
-    ssa.create_property("priority", "low")  # "low", "medium", "high"
-    ssa.task_create("sensor_sim", simulate_random_sensor, 1000)
+    citylink.create_property("priority", "low")  # "low", "medium", "high"
+    citylink.task_create("sensor_sim", simulate_random_sensor, 1000)

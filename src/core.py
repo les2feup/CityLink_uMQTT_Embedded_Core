@@ -1,5 +1,5 @@
-from ssa import EmbeddedCore
-from ssa.interfaces import Serializer
+from citylink import EmbeddedCore
+from citylink.interfaces import Serializer
 
 import asyncio
 from time import ticks_ms, ticks_diff, sleep_ms
