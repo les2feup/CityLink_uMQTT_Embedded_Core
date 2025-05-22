@@ -38,3 +38,7 @@ EPOCH_YEAR = gmtime(0)[0]
 
 DEFAULT_FOPEN_MODE = const("r")
 DEFAULT_SERIALIZER = json
+
+STATUS_UNDEFINED = const("UNDEF")
+STATUS_ADAPTING = const("ADAPT")
+STATUS_OK = const("OK")

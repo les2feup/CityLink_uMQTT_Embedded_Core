@@ -51,6 +51,7 @@ class uMQTTCore(EmbeddedCore):
 
         self._builtin_properties = {
             "log_level": DEFAULT_LOG_LEVEL,
+            "status": STATUS_UNDEFINED,
         }
 
         self.is_registered = False
@@ -192,13 +193,15 @@ class uMQTTCore(EmbeddedCore):
             return
 
         try:
-            self.emit_event(
+            self._emit_event(
                 "log",
                 {
                     "level": str(level),
                     "message": msg,
                     "epoch_timestamp": get_epoch_timestamp(),
                 },
+                False,
+                EVENT_QOS,
                 core_event=True,
             )
         except Exception as e:
@@ -259,7 +262,7 @@ class uMQTTCore(EmbeddedCore):
                 return
 
             if payload["status"] != "success":
-                #//TODO: handle better the schema validation
+                # //TODO: handle better the schema validation
                 self.log(
                     f"Failed to register device: {payload['message']}", LogLevels.ERROR
                 )
@@ -349,7 +352,7 @@ class uMQTTCore(EmbeddedCore):
         core = uMQTTCore(config_dir, **kwargs)
         core._load_config()
 
-        def main_decorator(main_func):
+        def main_decorator(main_func, forceAdapt=false):
             """
             Decorates the main function of the EmbeddedCore.
 
@@ -374,7 +377,27 @@ class uMQTTCore(EmbeddedCore):
 
                 async def main_task():
                     main_func(core)
-                    core.log("User main completed. Entering main loop", LogLevels.DEBUG)
+                    core.log(
+                        "Setup main completed. Entering main loop", LogLevels.DEBUG
+                    )
+
+                    if forceAdapt:
+                        core._set_property(
+                            "status",
+                            STATUS_ADAPTING,
+                            PROPERTY_RETAIN,
+                            PROPERTY_QOS,
+                            core_prop=True,
+                        )
+                    else:
+                        core._set_property(
+                            "status",
+                            STATUS_OK,
+                            PROPERTY_RETAIN,
+                            PROPERTY_QOS,
+                            core_prop=True,
+                        )
+
                     while True:
                         start_time = ticks_ms()
                         core._listen()
@@ -443,11 +466,54 @@ class uMQTTCore(EmbeddedCore):
 
         return self._properties[property_name]
 
+    def _set_property(
+        self,
+        property_name,
+        value,
+        retain,
+        qos,
+        core_prop=False,
+    ):
+        map = None
+        namespace = None
+
+        if core_prop and property_name in self._builtin_properties:
+            map = self._builtin_properties
+            namespace = RT_NAMESPACE
+        if not core_prop and property_name in self._properties:
+            map = self._properties
+            namespace = APP_NAMESPACE
+
+        if map is None or namespace is None:
+            # TODO: Log the error
+            self.log(f"Property {property_name} does not exist.", LogLevels.WARN)
+            return
+
+        if not isinstance(value, type(map[property_name])):
+            # TODO: Log the error
+            self.log(
+                f"Error setting: '{namespace}/{property_name}' expected {type(map[property_name]).__name__} type, got {type(value).__name__}",
+                LogLevels.ERROR,
+            )
+            return
+
+        if isinstance(value, dict):
+            map[property_name].update(value)
+        else:
+            map[property_name] = value
+
+        topic = f"{self._base_property_topic}/{namespace}/{property_name}"
+        payload = self._serializer.dumps(value)
+
+        try:
+            self._publish(topic, payload, retain=retain, qos=qos)
+        except Exception as e:
+            self.log(f"Failed to publish property update: {e}", LogLevels.ERROR)
+
     def set_property(
         self,
         property_name,
         value,
-        core_prop=False,
         retain=PROPERTY_RETAIN,
         qos=PROPERTY_QOS,
         **_,
@@ -470,51 +536,15 @@ class uMQTTCore(EmbeddedCore):
 
         Interface: AffordanceHandler
         """
+        self._set_property(property_name, value, retain, qos, False)
 
-        map = None
-        namespace = None
-
-        if core_prop and property_name in self._builtin_properties:
-            map = self._builtin_properties
-            namespace = RT_NAMESPACE
-        if not core_prop and property_name in self._properties:
-            map = self._properties
-            namespace = APP_NAMESPACE
-
-        if map is None or namespace is None:
-            # TODO: Log the error
-            self.log(f"Property {property_name} does not exist.", LogLevels.WARN)
-            return
-
-        if not isinstance(value, type(map[property_name])):
-            # TODO: Log the error
-            self.log(
-                f"Value of property '{namespace}/{property_name}' must be of type {type(map[property_name]).__name__}",
-                LogLevels.ERROR,
-            )
-            return
-
-        if isinstance(value, dict):
-            map[property_name].update(value)
-        else:
-            map[property_name] = value
-
-        topic = f"{self._base_property_topic}/{namespace}/{property_name}"
-        payload = self._serializer.dumps(value)
-
-        try:
-            self._publish(topic, payload, retain=retain, qos=qos)
-        except Exception as e:
-            self.log(f"Failed to publish property update: {e}", LogLevels.ERROR)
-
-    def emit_event(
+    def _emit_event(
         self,
         event_name,
         event_data,
+        retain,
+        qos,
         core_event=False,
-        retain=EVENT_RETAIN,
-        qos=EVENT_QOS,
-        **_,
     ):
         """
         Emit an event with the specified name and data.
@@ -535,6 +565,30 @@ class uMQTTCore(EmbeddedCore):
         topic = f"{self._base_event_topic}/{namespace}/{event_name}"
         payload = self._serializer.dumps(event_data)
         self._publish(topic, payload, retain=retain, qos=qos)
+
+    def emit_event(
+        self,
+        event_name,
+        event_data,
+        retain=EVENT_RETAIN,
+        qos=EVENT_QOS,
+        **_,
+    ):
+        """
+        Emit an event with the specified name and data.
+
+        Publishes an event to the MQTT broker with the given payload.
+
+        Args:
+            event_name: Name of the event to emit
+            event_data: Data payload for the event
+            retain: MQTT retain flag (default: False)
+            qos: MQTT QoS level (default: 0)
+            **_: Additional keyword arguments (ignored)
+
+        Interface: AffordanceHandler
+        """
+        self._emit_event(event_name, event_data, retain, qos, False)
 
     def sync_executor(func):
         """
