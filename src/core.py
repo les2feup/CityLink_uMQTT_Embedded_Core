@@ -1,3 +1,13 @@
+# TODO: Remove everything that is not strictly essential for OTA updates from this file
+#       All other feature can be loaded from separate scripts during initialization
+#       At minimum, if only this file exists, then the device must still be able to
+#       connect and receive updates
+# OTA updates need:
+#    1. init network & connect to broker
+#    2. publish an "update ready" message
+#    3. receive and handle vfs write/delete
+#    4. reload on command
+
 from citylink import EmbeddedCore
 from citylink.interfaces import Serializer
 
@@ -58,6 +68,7 @@ class uMQTTCore(EmbeddedCore):
         self._mqtt_ready = False
         self.last_publish_time = 0
 
+    #NOTE: optimizing for size. supressing serializer interface
     def _load_config(self):
         """
         Load the configuration from the specified directory.
@@ -67,17 +78,17 @@ class uMQTTCore(EmbeddedCore):
 
         Interface: EmbeddedCore
         """
-        from ._config import load_configuration
-
-        self._config = load_configuration(
-            self._config_dir, self._fopen_mode, self._serializer
-        )
+        try:
+            with open("./config/config.json", "r") as f:
+                self.config = json.load(f)
+        except Exception as e:
+            raise Exception(f"[ERROR] Failed to load configuration file: {e}") from e
 
         log_level = LogLevels.from_str(self._config.get("log_level"))
         if log_level is None:
             self.log_level = DEFAULT_LOG_LEVEL
 
-        self._id = self._config.get("id")
+        self._id = self._config.get(id")
         if self._id is not None:
             self.is_registered = True
             return
@@ -85,9 +96,10 @@ class uMQTTCore(EmbeddedCore):
         from machine import unique_id
         from binascii import hexlify
 
-        # Id to use as part of the MQTT topicss and client ID
+        # Id to use as part of the MQTT topics and client ID
         self._id = hexlify(unique_id()).decode(MQTT_TOPIC_ENCODING)
 
+    #NOTE: optimizing for size. supressing serializer interface
     def _write_config(self, update_dict):
         """
         Write the configuration to the specified directory.
@@ -101,13 +113,20 @@ class uMQTTCore(EmbeddedCore):
         Interface: EmbeddedCore
         """
         self._config.update(update_dict)
+        try:
+            with open("./config/config.json", r) as f:
+                json.dump(self.config, f)
+        except Exception as e:
+            raise Exception(f"[ERROR] Failed to write configuration file: {e}") from e
 
-        from ._config import write_configuration
+        # from ._config import write_configuration
+        #
+        # write_configuration(
+        #     self._config, self._config_dir, self._fopen_mode, self._serializer
+        # )
 
-        write_configuration(
-            self._config, self._config_dir, self._fopen_mode, self._serializer
-        )
-
+    #TODO: optimize for size. leave only the essential parts necessary for OTA updates
+    #      move the rest to a separate file
     def _connect(self):
         """
         Attempt to connect to the Edge Connector.
@@ -180,6 +199,7 @@ class uMQTTCore(EmbeddedCore):
         self._mqtt.publish(topic, payload, retain=retain, qos=qos)
         self.last_publish_time = ticks_ms()
 
+    #TODO: move this to a separate module
     def log(self, msg, level=DEFAULT_LOG_LEVEL):
         if level not in LogLevels:
             log(f"Invalid log level: {level}", LogLevels.ERROR)
@@ -225,6 +245,8 @@ class uMQTTCore(EmbeddedCore):
             self._mqtt.ping()
             self.last_publish_time = ticks_ms()
 
+    #TODO: simplify logic as much as possible
+    #      suppress unnecessary logging
     def _register_device(self):
         """
         Register the device with the WoT servient.
@@ -300,6 +322,7 @@ class uMQTTCore(EmbeddedCore):
             sleep_ms(POLLING_INTERVAL_MS)
             time_passed += POLLING_INTERVAL_MS
 
+    # TODO: only OTA stuff. move the rest to a separate file
     def _setup_mqtt(self):
         """
         Set up MQTT topic structure and message handling.
@@ -412,8 +435,10 @@ class uMQTTCore(EmbeddedCore):
 
         return main_decorator
 
-    ## AFFORDANCE HANDLER INTERFACE ##
+    # TODO: Affordance handler implementations can be moved to a separate module
+    #       to reduce the size of this file and make it more modular
 
+    ## AFFORDANCE HANDLER INTERFACE ##
     def create_property(self, property_name, initial_value, net_ro=False, **_):
         """
         Create a new property with the specified name and initial value.
