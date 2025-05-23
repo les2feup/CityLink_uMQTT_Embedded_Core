@@ -1,6 +1,6 @@
 ## AFFORDANCE HANDLER INTERFACE ##
 class EmbeddedCoreExt:
-    def create_property(self, property_name, initial_value, default_setter=True**_):
+    def create_property(self, property_name, initial_value, default_setter=True, **_):
         if property_name in self._properties:
             return
 
@@ -18,7 +18,7 @@ class EmbeddedCoreExt:
         value,
         retain,
         qos,
-        *_,
+        **_,
     ):
         if property_name not in self._properties:
             return
@@ -45,7 +45,7 @@ class EmbeddedCoreExt:
         event_data,
         retain,
         qos,
-        *_,
+        **_,
     ):
         # TODO: sanitize event names
         topic = f"{self._base_event_topic}/app/{event_name}"

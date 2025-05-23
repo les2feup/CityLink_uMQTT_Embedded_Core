@@ -1,8 +1,11 @@
+import os
 import json
 import asyncio
 from .const import *
 from umqtt.simple import MQTTClient
-from time import ticks_ms, ticks_diff, sleep_ms
+from binascii import crc32, a2b_base64
+from time import ticks_ms, ticks_diff, sleep_ms, gmtime, time
+
 
 def _with_exponential_backoff(func, retries, base_timeout_ms):
     for i in range(retries):
@@ -22,20 +25,21 @@ def _with_exponential_backoff(func, retries, base_timeout_ms):
 
 def main(setup=None):
     print("[MAIN] Starting main function...")
-    otau = False
+    otau_mode = True if setup is None else False
     try:
         open(OTAU_FILE, "r").close()
-        otau = True
         print("[MAIN] OTA Update mode detected.")
-    except OSError:
+        otau_mode = True
+    except Exception:
+        if otau_mode:
+            print("[MAIN] No setup provided, forcing OTA Update mode.")
+            try:
+                open(OTAU_FILE, "x").close()
+            except Exception as e:
+                raise Exception("[FATAL] Failed to create OTA file.") from e
         print("[MAIN] No OTA Update mode detected.")
-        pass
 
-    core = EmbeddedCore(otau)
-    if setup is None and not otau:
-        print("[MAIN] [WARN] No setup function provided. Entering OTA Update mode.")
-        core._otau_init()
-        return
+    core = EmbeddedCore(otau_mode)
 
     core._init()
     core._connect()
@@ -44,7 +48,7 @@ def main(setup=None):
 
     async def main_task():
         topic = f"{core._base_property_topic}/core/status"
-        if otau:
+        if otau_mode:
             core._publish(topic, "ADAPT", True, 1)
         else:
             setup(core)
@@ -54,7 +58,7 @@ def main(setup=None):
             start_time = ticks_ms()
             core._listen()
             elapsed_time = ticks_diff(ticks_ms(), start_time)
-            await core.task_sleep_ms(max(0, polling_interval_ms - elapsed_time))
+            await asyncio.sleep_ms(max(0, POLLING_INTERVAL_MS - elapsed_time))
 
     core._start_scheduler(main_task())
 
@@ -78,26 +82,39 @@ class EmbeddedCore:
             raise Exception(f"[FATAL] Failed to load configuration file: {e}") from e
 
         self._id = self._config.get("id")
- 
-    def _load_ext(self, fname):
-        try:
-            with open(fname, "r") as f:
-                code = f.read()
 
-            g = {}  # Global namespace for exec
-            exec(code, g)
-            ext_class = g.get("EmbeddedCoreExt")
+    def _load_ext(self, fname):
+        ext_class = None
+        module_name = None
+
+        try:
+            print(f"[INFO] Loading extension: {fname}")
+            if fname.endswith(".py"):
+                g = {}  # Global namespace for exec
+                with open(fname, "rb") as f:
+                    code = f.read()
+                    exec(code, g)
+                ext_class = g.get("EmbeddedCoreExt")
+
+            elif fname.endswith(".mpy"):
+                module_name = fname.replace(".mpy", "")
+                module = __import__(module_name)
+                ext_class = getattr(module, "EmbeddedCoreExt", None)
+
             if not ext_class:
+                print(f"[ERROR] [_load_ext] No EmbeddedCoreExt class found in {fname}")
                 return
 
             for name, member in ext_class.__dict__.items():
                 if callable(member) and name != "_install":
-                    bound_method = lambda self_inst=self, func=member: func(self_inst)
+                    print(f"[INFO] [_load_ext] Found method: {name}")
+                    bound_method = (
+                        lambda self_inst=self, func=member: lambda *a, **kw: func(
+                            self_inst, *a, **kw
+                        )
+                    )
                     setattr(self, name, bound_method())
-
-            install = g.get("_install")
-            if install:
-                install(self)
+                    print(f"[INFO] [_load_ext] Bound method: {name}")
 
         except OSError as e:
             print(f"[ERROR] [_load_ext] Err opening/reading {fname}: {e}")
@@ -108,6 +125,7 @@ class EmbeddedCore:
         if self._id is None:
             from binascii import hexlify
             from machine import unique_id
+
             self._id = hexlify(unique_id()).decode("utf-8")
         else:
             self.is_registered = True
@@ -122,14 +140,16 @@ class EmbeddedCore:
             self._actions = {
                 "core/otau/init": self._otau_init,
             }
-            for fname in os.listdir("/ext"):
-                self._load_ext(f"/ext/{fname}")
-
+            try:
+                for fname in os.listdir("/citylink/ext"):
+                    self._load_ext(f"/citylink/ext/{fname}")
+            except Exception as e:
+                raise Exception(f"[FATAL] Failed to load extensions: {e}") from e
 
     def _write_config(self, update_dict):
         self._config.update(update_dict)
         try:
-            with open("./config/config.json", r) as f:
+            with open("./config/config.json", "r") as f:
                 json.dump(self._config, f)
         except Exception as e:
             raise Exception(f"[ERROR] Failed to write configuration file: {e}") from e
@@ -138,13 +158,13 @@ class EmbeddedCore:
         import network
 
         net_conf = self._config["network"]
-        self.wlan = network.WLAN(network.STA_IF)
-        self.wlan.active(True)
-        self.wlan.connect(net_conf["ssid"], net_conf["password"])
+        self._wlan = network.WLAN(network.STA_IF)
+        self._wlan.active(True)
+        self._wlan.connect(net_conf["ssid"], net_conf["password"])
 
         broker_conf = self._config["runtime"]["broker"]
         self._mqtt = MQTTClient(
-            client_id=client_id,
+            client_id=self._id,
             server=broker_conf["hostname"],
             port=broker_conf.get("port", DEFAULT_MQTT_PORT),
             user=broker_conf.get("username"),
@@ -156,18 +176,20 @@ class EmbeddedCore:
         def check_wlan():
             if not self._wlan.isconnected():
                 raise Exception(f"WiFi Connecting")
+            else:
+                print(f"[INFO] Connected to {self._wlan.ifconfig()[0]}")
+
+        def mqtt_connect():
+            self._mqtt.connect(
+                broker_conf.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
+                timeout_ms,
+            )
+            print(f"[INFO] Connected to MQTT broker {broker_conf['hostname']}")
 
         retries = self._config["runtime"]["connection"].get("retries", 3)
         timeout_ms = self._config["runtime"]["connection"].get("timeout_ms", 5000)
         _with_exponential_backoff(check_wlan, retries, timeout_ms)
-        _with_exponential_backoff(
-            self._mqtt.connect(
-                broker_conf.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
-                timeout_ms,
-            ),
-            retries,
-            timeout_ms,
-        )
+        _with_exponential_backoff(mqtt_connect, retries, timeout_ms)
 
     def _disconnect(self):
         self._mqtt_ready = False
@@ -234,8 +256,6 @@ class EmbeddedCore:
             time_passed += POLLING_INTERVAL_MS
 
     def _setup_mqtt(self):
-        from ._setup import mqtt_setup
-
         base = f"citylink/{self._id}"
         self._base_event_topic = f"{base}/events"
         self._base_action_topic = f"{base}/actions"
@@ -257,44 +277,39 @@ class EmbeddedCore:
                     print("Error in _on_message:", e)
                     return
 
-            self._invoke_action(namespace, action_name, action_input)
+            action = self._actions.get(action_name)
+            if action:
+                asyncio.create_task(action(action_input))
+            else:
+                print(f"[ERROR] Action '{action_name}' not found.")
 
-        self.mqtt.set_callback(on_message)
+        self._mqtt.set_callback(on_message)
 
         if self._otau:
-            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=2)
-            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=2)
-            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/finish", qos=1)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=2)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=2)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/finish", qos=1)
         else:
-            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/init", qos=1)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/init", qos=1)
 
         self._mqtt_ready = True
+        print("[INFO] Subscribed to action topics. MQTT ready.")
 
-    def _invoke_action(self, action_name, action_input, **_):
-        action = self._actions.get(action_name)
-        if action:
-            asyncio.create_task(action(action_input))
-
-    async def _otau_init(self, _):
+    async def _otau_init(self, *_):
         if self._otau:
             return
 
         open(OTAU_FILE, "x").close()
         self._reset()
 
-    async def _otau_finish(self, _):
+    async def _otau_finish(self, *_):
         if not self._otau:
             return
 
-        import os
-
         os.remove(OTAU_FILE)
-
         self._reset()
 
     def _wrap_vfs_action(action_func):
-        from time import gmtime, time
-
         def builtin_action_wrapper(self, action_input):
             base = gmtime(0)[0]
             action_result = action_func(self, action_input)
@@ -317,61 +332,29 @@ class EmbeddedCore:
     @_wrap_vfs_action
     async def _vfs_write(self, action_input):
         result = {"action": "write", "error": False, "message": ""}
-
-        file_path = action_input.get("path")
-        if file_path is None:
-            result["error"] = True
-            result["message"] = "Missing path in action input."
-            return result
-
-        payload = action_input.get("payload")
-        if payload is None or not isinstance(payload, dict):
-            result["error"] = True
-            result["message"] = "Missing or invalid payload in action input."
-            return result
-
-        data = payload.get("data")
-        data_hash = int(payload.get("hash"), 16)
-        data_hash_algo = payload.get("algo")
-
-        if any(map(lambda x: x is None, [data, data_hash, data_hash_algo])):
-            result["error"] = True
-            result["message"] = "Missing or invalid payload contents."
-            return result
-
-        append = action_input.get("append", False)
-
         try:
-            from binascii import crc32, a2b_base64
-            import os
+            file_path = action_input["path"].strip("/")
+            payload = action_input["payload"]
+            data = payload["data"]
+            data_hash = int(payload["hash"], 16)
+            algo = payload["algo"]
+            append = action_input.get("append", False)
 
-            if data_hash_algo.lower() != "crc32":
-                raise NotImplementedError("Only CRC32 is supported for now.")
+            if algo != "crc32":
+                raise NotImplementedError("Only CRC32 is supported.")
 
-            actual_hash = crc32(data)
-            if actual_hash != data_hash:
-                raise ValueError(
-                    f"Hash mismatch, expected {hex(data_hash)}, got {hex(actual_hash)}"
-                )
+            if crc32(data) != data_hash:
+                raise ValueError("CRC32 mismatch")
 
             mode = "a" if append else "w"
+            parts = file_path.split("/")
+            dir_parts, file_name = parts[:-1], parts[-1]
 
-            file_path = file_path.rstrip("/")
-            path_parts = file_path.split("/")
-            file_name = path_parts[-1]
+            # Validate path (flat relative only)
+            if ".." in dir_parts or file_path.startswith("/"):
+                raise ValueError("Unsafe file path")
 
-            root_dir = os.getcwd()
-            file_root = path_parts[0]
-            if len(path_parts) == 1 or file_root in ["", "."]:
-                file_root = root_dir
-
-            if file_root != root_dir:
-                raise ValueError(
-                    f"Invalid file path: '{file_path}' - expected root dir to be '{root_dir} but is '{file_root}'"
-                )
-
-            path_parts = path_parts[1:]  # Skip the root directory
-            for part in path_parts[:-1]:
+            for part in dir_parts:
                 if part not in os.listdir():
                     os.mkdir(part)
                 os.chdir(part)
@@ -379,9 +362,9 @@ class EmbeddedCore:
             with open(file_name, mode) as f:
                 f.write(a2b_base64(data))
 
-            os.chdir(root_dir)
-
+            os.chdir("/")  # Reset to root for safety
             result["message"] = file_path
+
         except Exception as e:
             result["error"] = True
             result["message"] = str(e)
@@ -394,15 +377,19 @@ class EmbeddedCore:
             "Subclasses must implement builtin_action_vfs_delete()"
         )
 
-    async def _reset(self, _):
-        try:
-            self._publish(f"{self._base_property_topic}/core/status", "UNDEF", True, 1)
-            self._disconnect()
-        except Exception as e:
-            self.log(f"Failed to disconnect: {e}", LogLevels.ERROR)
+    def _reset(self):
+        if self._mqtt_ready:
+            try:
+                self._publish(
+                    f"{self._base_property_topic}/core/status", "UNDEF", True, 1
+                )
+                self._disconnect()
+            except Exception as e:
+                pass
 
         from machine import soft_reset
 
+        print("[INFO] Issuing soft reset...")
         soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
