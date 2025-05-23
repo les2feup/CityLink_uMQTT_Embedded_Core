@@ -65,3 +65,30 @@ class LogLevels:
                 return level
 
         return None
+
+    # def log(self, msg, level=DEFAULT_LOG_LEVEL):
+    #     if level not in LogLevels:
+    #         log(f"Invalid log level: {level}", LogLevels.ERROR)
+    #
+    #     if level < # self.log_level:
+    #         return
+    #
+    #     print(f"[{level}] {msg}")
+    #
+    #     if not self._mqtt_ready:
+    #         return
+    #
+    #     try:
+    #         self._emit_event(
+    #             "log",
+    #             {
+    #                 "level": str(level),
+    #                 "message": msg,
+    #                 "epoch_timestamp": get_epoch_timestamp(),
+    #             },
+    #             False,
+    #             EVENT_QOS,
+    #             core_event=True,
+    #         )
+    #     except Exception as e:
+    #         print(f"[ERROR] Failed to emit log event: {e}")

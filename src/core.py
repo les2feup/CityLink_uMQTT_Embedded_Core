@@ -1,37 +1,10 @@
-# TODO: Remove everything that is not strictly essential for OTA updates from this file
-#       All other feature can be loaded from separate scripts during initialization
-#       At minimum, if only this file exists, then the device must still be able to
-#       connect and receive updates
-# OTA updates need:
-#    1. init network & connect to broker
-#    2. publish an "update ready" message
-#    3. receive and handle vfs write/delete
-#    4. reload on command
-
 import asyncio
 from .const import *
 from umqtt.simple import MQTTClient
 from time import ticks_ms, ticks_diff, sleep_ms
 
-def with_exponential_backoff(func, retries, base_timeout_ms):
-    # Attempts to execute a function with exponential backoff on failure.
 
-    # This function calls the provided callable, retrying up to the specified number of times.
-    # After each failure, it waits for an exponentially increasing delay starting at base_timeout_ms
-    # milliseconds. If the callable succeeds, its result is returned immediately; if all attempts fail,
-    # an Exception is raised.
-
-    # Args:
-    #    func: The callable to execute.
-    #    retries: The maximum number of retry attempts.
-    #    base_timeout_ms: The initial wait time in milliseconds, which doubles after each attempt.
-
-    # Returns:
-    #    The result of the callable if execution is successful.
-
-    # Raises:
-    #    Exception: If the callable fails on all retry attempts.
-
+def _with_exponential_backoff(func, retries, base_timeout_ms):
     for i in range(retries):
         retry_timeout = base_timeout_ms * (2**i)
         # TODO: suppress this print when building for production
@@ -47,87 +20,54 @@ def with_exponential_backoff(func, retries, base_timeout_ms):
     raise Exception(f"[ERROR] {func.__name__} failed after {retries} retries")
 
 
+def main(setup=None):
+    otau = False
+    try:
+        open(OTAU_FILE, "r").close()
+        otau = True
+    except OSError:
+        pass
+
+    core = EmbeddedCore(otau)
+    if setup is None and not otau:
+        print("[MAIN] [WARN] No setup function provided. Entering OTA Update mode.")
+        core._otau_init()
+
+    core._connect()
+    core._edge_con_register()
+    core._setup_mqtt()
+
+    async def main_task():
+        topic = f"{core._base_property_topic}/core/status"
+        if otau:
+            core._publish(topic, "ADAPT", True, 1)
+        else:
+            setup(core)
+            core._publish(topic, "OK", True, 1)
+
+        while True:
+            start_time = ticks_ms()
+            core._listen()
+            elapsed_time = ticks_diff(ticks_ms(), start_time)
+            await core.task_sleep_ms(max(0, polling_interval_ms - elapsed_time))
+
+    core._start_scheduler(main_task())
+
+
 class EmbeddedCore:
-    # Micropython implementation of the CityLink EmbeddedCore interface
-    # using MQTT over a WLAN.
+    def __init__(self, otau):
+        self._tasks = {}
+        self._actions = {}
+        self._properties = {}
 
-    def _load_ext(self, fname, **kwargs):
-        # Load an external module.
-
-        # Args:
-        #    fname: Name of the external module to load
-        #    **kwargs: Additional keyword arguments (ignored)
-        try:
-            with open(fname, "r") as f:
-                code = f.read()
-
-            g = {}  # Global namespace for exec
-            exec(code, g)
-            ext_class = g.get("EmbeddedCoreExt")
-            if not ext_class:
-                return
-
-            init_method = ext_class.__dict__.get("__init__")
-            if init_method and callable(init_method):
-                try:
-                    init_method(self, **kwargs)
-                except TypeError as e:
-                    print(f"[ERROR] [_load_ext] __init__ call failed for {fname}: {e}")
-                    return
-
-            for name, member in ext_class.__dict__.items():
-                if callable(member) and name != "__init__":
-                    bound_method = (
-                        lambda self_inst=self, func=member: lambda *a, **kw: func(
-                            self_inst, *a, **kw
-                        )
-                    )
-                    setattr(self, name, bound_method())
-
-        except OSError as e:
-            print(f"[ERROR] [_load_ext] Err opening/reading {fname}: {e}")
-        except Exception as e:
-            print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
-
-    def __init__(
-        self,
-        otau=False,
-        **kwargs,
-    ):
-        # Initialize the uMQTTCore with configuration and serialization parameters.
-
-        # Args:
-        #    config_dir: Directory containing configuration files
-        #    fopen_mode: File open mode (default: "r")
-        #    serializer: Object with dumps/loads methods for serialization (default: json)
-        #    **_: Additional keyword arguments (ignored)
-
-        # self._tasks = {}
-        # self._actions = {}
-        # self._properties = {}
-        # self._net_ro_props = set()
-
-        # self._builtin_actions = {
-        #     "vfs/list": self._builtin_action_vfs_list,
-        #     "vfs/read": self._builtin_action_vfs_read,
-        #     "vfs/write": self._builtin_action_vfs_write,
-        #     "vfs/delete": self._builtin_action_vfs_delete,
-        #     "reload": self._builtin_action_reload_core,
-        #     "set_property": self._builtin_action_set_property,
-        # }
         self._otau = otau
-        self._core_props = {
-            "core/log_level": DEFAULT_LOG_LEVEL,
-            "core/status": STATUS_UNDEFINED,
-        }
-
         self._mqtt_ready = False
         self.is_registered = False
         self.last_publish_time = 0
 
         # Load configuration
         try:
-            with open("./config/config.json", "r") as f:
+            with open("/config/config.json", "r") as f:
                 self.config = json.load(f)
         except Exception as e:
             raise Exception(f"[FATAL] Failed to load configuration file: {e}") from e
@@ -142,30 +82,48 @@ class EmbeddedCore:
         else:
             self.is_registered = True
 
-        # Load extentions
-        self._actions = {}
         if self._otau:
             self._actions = {
                 "core/otau/write": self._vfs_write,
                 "core/otau/delete": self._vfs_delete,
-                "core/reload": self._vfs_reload,
+                "core/otau/finish": self._otau_finish,
             }
         else:
-            # If not in OTA Update mode, load existing extensions
-            for fname in os.listdir("./ext"):
-                self._load_ext(f"./ext/{fname}", **kwargs)
+            # if not in OTA Update mode, load existing extensions
+            self._actions = {
+                "core/otau/init": self._otau_init,
+            }
 
-    # NOTE: optimizing for size. supressing serializer interface
+            # If not in OTA Update mode, load extensions
+            for fname in os.listdir("/ext"):
+                self._load_ext(f"/ext/{fname}")
+
+    def _load_ext(self, fname):
+        try:
+            with open(fname, "r") as f:
+                code = f.read()
+
+            g = {}  # Global namespace for exec
+            exec(code, g)
+            ext_class = g.get("EmbeddedCoreExt")
+            if not ext_class:
+                return
+
+            for name, member in ext_class.__dict__.items():
+                if callable(member) and name != "_install":
+                    bound_method = lambda self_inst=self, func=member: func(self_inst)
+                    setattr(self, name, bound_method())
+
+            install = g.get("_install")
+            if install:
+                install(self)
+
+        except OSError as e:
+            print(f"[ERROR] [_load_ext] Err opening/reading {fname}: {e}")
+        except Exception as e:
+            print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
+
     def _write_config(self, update_dict):
-        # Write the configuration to the specified directory.
-
-        # Updates the current configuration with provided dictionary
-        # and persists it to storage.
-
-        # Args:
-        #    update_dict: Dictionary containing configuration updates
-
-        # Interface: EmbeddedCore
         self._config.update(update_dict)
         try:
             with open("./config/config.json", r) as f:
@@ -174,15 +132,6 @@ class EmbeddedCore:
             raise Exception(f"[ERROR] Failed to write configuration file: {e}") from e
 
     def _connect(self):
-        # Attempt to connect to the Edge Connector.
-        # In this concrete implementation, this function connects to the WLAN network
-        # and then to the MQTT Broker.
-
-        # Establishes connections to the configured WiFi network and MQTT broker
-        # with exponential backoff for retries.
-
-        # Interface: EmbeddedCore
-
         import network
 
         net_conf = self._config["network"]
@@ -194,10 +143,10 @@ class EmbeddedCore:
         self._mqtt = MQTTClient(
             client_id=client_id,
             server=broker_conf["hostname"],
-            port=broker_conf.get("port", 1883),
+            port=broker_conf.get("port", DEFAULT_MQTT_PORT),
             user=broker_conf.get("username"),
             password=broker_conf.get("password"),
-            keepalive=broker_conf.get("keepalive", 60),
+            keepalive=broker_conf.get("keepalive", DEFAULT_MQTT_KEEPALIVE),
             ssl=broker_conf.get("ssl"),
         )
 
@@ -207,8 +156,8 @@ class EmbeddedCore:
 
         retries = self._config["runtime"]["connection"].get("retries", 3)
         timeout_ms = self._config["runtime"]["connection"].get("timeout_ms", 5000)
-        with_exponential_backoff(check_wlan, retries, timeout_ms)
-        with_exponential_backoff(
+        _with_exponential_backoff(check_wlan, retries, timeout_ms)
+        _with_exponential_backoff(
             self._mqtt.connect(
                 broker_conf.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
                 timeout_ms,
@@ -218,95 +167,29 @@ class EmbeddedCore:
         )
 
     def _disconnect(self):
-        """
-        Disconnect from the network and exit the runtime.
-
-        Terminates MQTT broker connection and disconnects from WiFi network.
-
-        Interface: EmbeddedCore
-        """
         self._mqtt_ready = False
         self._mqtt.disconnect()
         self._wlan.disconnect()
 
     def _publish(self, topic, payload, retain, qos):
-        """
-        Publish a message to the MQTT broker.
-
-        Args:
-            topic: MQTT topic to publish to
-            payload: Message payload to send
-            retain: MQTT retain flag (default: False)
-            qos: MQTT QoS level (default: 0)
-        """
         self._mqtt.publish(topic, payload, retain=retain, qos=qos)
         self.last_publish_time = ticks_ms()
 
-    # # TODO: move this to a separate module
-    # def log(self, msg, level=DEFAULT_LOG_LEVEL):
-    #     if level not in LogLevels:
-    #         log(f"Invalid log level: {level}", LogLevels.ERROR)
-    #
-    #     if level < # self.log_level:
-    #         return
-    #
-    #     print(f"[{level}] {msg}")
-    #
-    #     if not self._mqtt_ready:
-    #         return
-    #
-    #     try:
-    #         self._emit_event(
-    #             "log",
-    #             {
-    #                 "level": str(level),
-    #                 "message": msg,
-    #                 "epoch_timestamp": get_epoch_timestamp(),
-    #             },
-    #             False,
-    #             EVENT_QOS,
-    #             core_event=True,
-    #         )
-    #     except Exception as e:
-    #         print(f"[ERROR] Failed to emit log event: {e}")
-
     def _listen(self):
-        """
-        Listen and handle incoming requests.
-
-        Checks for new MQTT messages and processes them.
-
-        Args:
-            *_: Variable arguments (ignored)
-
-        Interface: EmbeddedCore
-        """
-
         self._mqtt.check_msg()
 
         if ticks_diff(ticks_ms(), self.last_publish_time) >= PING_TIMEOUT_MS:
             self._mqtt.ping()
             self.last_publish_time = ticks_ms()
 
-    # TODO: simplify logic as much as possible
-    #      suppress unnecessary logging
-    def _register_device(self):
-        #Register the device with the Edge Connector
-
-        #Sends registration request to the WoT servient and waits for confirmation.
-        #If already registered, skips the registration process.
-
-        #Interface: EmbeddedCore
-        # self.log("Inside register_device()", LogLevels.DEBUG)
-
+    def _edge_con_register(self):
         if self.is_registered:
-            # self.log(f"Device already registered with ID: {self._id}", LogLevels.INFO)
             return
 
-        registration_payload = self._serializer.dumps(self._config["reg"])
-        # self.log(f"Registration payload: {registration_payload}", LogLevels.DEBUG)
+        registration_payload = json.dumps(self._config["reg"])
         registering = False
 
+        # TODO: handle better the schema validation
         def on_registration(topic, payload):
             nonlocal registering
 
@@ -315,43 +198,27 @@ class EmbeddedCore:
 
             registering = True
 
-            topic = topic.decode(MQTT_TOPIC_ENCODING)
-            payload = self._serializer.loads(payload)
-            # # self.log(f"Received registration ack: {payload}", LogLevels.DEBUG)
+            topic = topic.decode("utf-8")
+            payload = json.loads(payload)
 
             if topic != f"citylink/{self._id}/registration/ack":
-                # # self.log(f"Unexpected registration topic: {topic}", LogLevels.WARN)
                 registering = False
                 return
 
             if payload["status"] != "success":
-                # //TODO: handle better the schema validation
-                # # self.log(
-                #     f"Failed to register device: {payload['message']}", LogLevels.ERROR
-                # )
                 registering = False
                 return
 
             self._id = payload["id"]
-            # # self.log(
-            #     f"Device registered successfully with ID: {self._id}", LogLevels.INFO
-            # )
             self._write_config({"id": self._id})
-            # # self.log(f"Device ID written to config", LogLevels.DEBUG)
             self.is_registered = True
 
-        # # self.log("Registering device...", LogLevels.INFO)
         self._mqtt.set_callback(on_registration)
-        # # self.log("Subscribing to registration ack topic...", LogLevels.DEBUG)
-        self._mqtt.subscribe(
-            f"citylink/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS
-        )
+        self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", qos=1)
 
-        # # self.log("Waiting for registration ack...", LogLevels.DEBUG)
         time_passed = 0
         while not self.is_registered and not registering:
             if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
-                # # self.log("Publishing registration message", LogLevels.DEBUG)
                 self._publish(
                     f"citylink/{self._id}/registration",
                     registration_payload,
@@ -363,12 +230,13 @@ class EmbeddedCore:
             sleep_ms(POLLING_INTERVAL_MS)
             time_passed += POLLING_INTERVAL_MS
 
-    # TODO: only OTA stuff. move the rest to a separate file
     def _setup_mqtt(self):
-        #Set up MQTT topic structure and message handling.
-
-        #Configures MQTT callbacks and topic subscriptions for action handling.
         from ._setup import mqtt_setup
+
+        base = f"citylink/{self._id}"
+        self._base_event_topic = f"{base}/events"
+        self._base_action_topic = f"{base}/actions"
+        self._base_property_topic = f"{base}/properties"
 
         def on_message(topic, payload):
             topic = topic.decode("utf-8")
@@ -383,405 +251,56 @@ class EmbeddedCore:
                 try:
                     action_input = json.loads(payload)
                 except Exception as e:
-                    # # self.log(f"Failed to deserialize payload: {e}", LogLevels.ERROR)
+                    print("Error in _on_message:", e)
                     return
 
             self._invoke_action(namespace, action_name, action_input)
 
-
         self.mqtt.set_callback(on_message)
-
-        base = f"citylink/{self._id}"
-        self._base_event_topic = f"{base}/events"
-        self._base_action_topic = f"{base}/actions"
-        self._base_property_topic = f"{base}/properties"
 
         if self._otau:
             self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=2)
             self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=2)
-            self.mqtt.subscribe(f"{self._base_action_topic}/core/reload", qos=2)
+            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/finish", qos=1)
+        else:
+            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/init", qos=1)
 
         self._mqtt_ready = True
 
-    def App(polling_interval_ms=POLLING_INTERVAL_MS, config_dir="./config", **kwargs):
-        """
-        Decorator to mark the entry point for the EmbeddedCore.
-
-        Creates a uMQTTCore instance, loads configuration, and sets up
-        the runtime environment.
-
-        Args:
-            polling_interval: Interval for message polling in milliseconds (default: 250)
-            config_dir: Directory containing configuration files (default: "./config")
-            **kwargs: Additional arguments passed to uMQTTCore uctor
-
-        Returns:
-            Function decorator that wraps the main application entry point
-
-        Interface: EmbeddedCore
-        """
-        core = uMQTTCore(config_dir, **kwargs)
-        core._load_config()
-
-        def main_decorator(main_func, forceAdapt=false):
-            """
-            Decorates the main function of the EmbeddedCore.
-
-            Args:
-                main_func: The main function to be decorated
-
-            Returns:
-                Wrapped function that initializes the runtime
-            """
-
-            def main_wrapper():
-                """
-                Wrapper for the main function of the EmbeddedCore.
-
-                Handles connection, registration, MQTT setup, and scheduler launch.
-                """
-                core._connect()
-                core._register_device()
-                core._setup_mqtt()
-
-                core.log("Connected to network. Initiating main task", LogLevels.INFO)
-
-                async def main_task():
-                    main_func(core)
-                    core.log(
-                        "Setup main completed. Entering main loop", LogLevels.DEBUG
-                    )
-
-                    if forceAdapt:
-                        core._set_property(
-                            "status",
-                            STATUS_ADAPTING,
-                            PROPERTY_RETAIN,
-                            PROPERTY_QOS,
-                            core_prop=True,
-                        )
-                    else:
-                        core._set_property(
-                            "status",
-                            STATUS_OK,
-                            PROPERTY_RETAIN,
-                            PROPERTY_QOS,
-                            core_prop=True,
-                        )
-
-                    while True:
-                        start_time = ticks_ms()
-                        core._listen()
-                        elapsed_time = ticks_diff(ticks_ms(), start_time)
-                        await core.task_sleep_ms(
-                            max(0, polling_interval_ms - elapsed_time)
-                        )
-
-                core._start_scheduler(main_task())
-
-            return main_wrapper
-
-        return main_decorator
-
-    # TODO: Affordance handler implementations can be moved to a separate module
-    #       to reduce the size of this file and make it more modular
-
-    ## AFFORDANCE HANDLER INTERFACE ##
-    def create_property(self, property_name, initial_value, net_ro=False, **_):
-        """
-        Create a new property with the specified name and initial value.
-
-        Args:
-            property_name: Name of the property to create
-            initial_value: Initial value for the property
-            net_ro: If True, property is read-only over the network (default: False)
-            **_: Additional keyword arguments (ignored)
-
-        Raises:
-            ValueError: If property already exists
-
-        Interface: AffordanceHandler
-        """
-        if property_name in self._properties:
-            # self.log(
-                f"Property {property_name} already exists. Set a new value using 'set_property'",
-                LogLevels.WARN,
-            )
-            return
-
-        # TODO: sanitize property names
-        if net_ro:
-            self._net_ro_props.add(property_name)
-        self._properties[property_name] = initial_value
-
-    def get_property(self, property_name, **_):
-        """
-        Get the value of a property by name.
-
-        Args:
-            property_name: Name of the property to retrieve
-            **_: Additional keyword arguments (ignored)
-
-        Returns:
-            Current value of the property
-
-        Raises:
-            ValueError: If property does not exist
-
-        Interface: AffordanceHandler
-        """
-        if property_name not in self._properties:
-            # self.log(
-                f"Property {property_name} does not exist. Create it using 'create_property' method.",
-                LogLevels.WARN,
-            )
-            return
-
-        return self._properties[property_name]
-
-    def _set_property(
-        self,
-        property_name,
-        value,
-        retain,
-        qos,
-        core_prop=False,
-    ):
-        map = None
-        namespace = None
-
-        if core_prop and property_name in self._core_props:
-            map = self._core_props
-            namespace = RT_NAMESPACE
-        if not core_prop and property_name in self._properties:
-            map = self._properties
-            namespace = APP_NAMESPACE
-
-        if map is None or namespace is None:
-            # TODO: Log the error
-            # self.log(f"Property {property_name} does not exist.", LogLevels.WARN)
-            return
-
-        if not isinstance(value, type(map[property_name])):
-            # TODO: Log the error
-            # self.log(
-                f"Error setting: '{namespace}/{property_name}' expected {type(map[property_name]).__name__} type, got {type(value).__name__}",
-                LogLevels.ERROR,
-            )
-            return
-
-        if isinstance(value, dict):
-            map[property_name].update(value)
-        else:
-            map[property_name] = value
-
-        topic = f"{self._base_property_topic}/{namespace}/{property_name}"
-        payload = self._serializer.dumps(value)
-
-        try:
-            self._publish(topic, payload, retain=retain, qos=qos)
-        except Exception as e:
-            # self.log(f"Failed to publish property update: {e}", LogLevels.ERROR)
-
-    def set_property(
-        self,
-        property_name,
-        value,
-        retain=PROPERTY_RETAIN,
-        qos=PROPERTY_QOS,
-        **_,
-    ):
-        """
-        Set the value of a property.
-
-        Updates a property value and publishes it via MQTT. For dict values,
-        merges with the existing property value.
-
-        Args:
-            property_name: Name of the property to update
-            value: New value for the property
-            retain: MQTT retain flag (default: True)
-            qos: MQTT QoS level (default: 0)
-            **_: Additional keyword arguments (ignored)
-
-        Raises:
-            ValueError: If property does not exist or has type mismatch
-
-        Interface: AffordanceHandler
-        """
-        self._set_property(property_name, value, retain, qos, False)
-
-    def _emit_event(
-        self,
-        event_name,
-        event_data,
-        retain,
-        qos,
-        core_event=False,
-    ):
-        """
-        Emit an event with the specified name and data.
-
-        Publishes an event to the MQTT broker with the given payload.
-
-        Args:
-            event_name: Name of the event to emit
-            event_data: Data payload for the event
-            retain: MQTT retain flag (default: False)
-            qos: MQTT QoS level (default: 0)
-            **_: Additional keyword arguments (ignored)
-
-        Interface: AffordanceHandler
-        """
-        # TODO: sanitize event names
-        namespace = RT_NAMESPACE if core_event else APP_NAMESPACE
-        topic = f"{self._base_event_topic}/{namespace}/{event_name}"
-        payload = self._serializer.dumps(event_data)
-        self._publish(topic, payload, retain=retain, qos=qos)
-
-    def emit_event(
-        self,
-        event_name,
-        event_data,
-        retain=EVENT_RETAIN,
-        qos=EVENT_QOS,
-        **_,
-    ):
-        """
-        Emit an event with the specified name and data.
-
-        Publishes an event to the MQTT broker with the given payload.
-
-        Args:
-            event_name: Name of the event to emit
-            event_data: Data payload for the event
-            retain: MQTT retain flag (default: False)
-            qos: MQTT QoS level (default: 0)
-            **_: Additional keyword arguments (ignored)
-
-        Interface: AffordanceHandler
-        """
-        self._emit_event(event_name, event_data, retain, qos, False)
-
-    def sync_executor(func):
-        """
-        Decorator for synchronous task or action executors.
-
-        Wraps a synchronous function to make it compatible with async execution.
-
-        Args:
-            func: Synchronous function to wrap
-
-        Returns:
-            Async-compatible wrapped function
-
-        Interface: AffordanceHandler
-        """
-
-        # Wrap the function in an async wrapper
-        # So it can be executed as a coroutine
-        async def wrapper(self, *args, **kwargs):
-            return func(self, *args, **kwargs)
-
-        return wrapper
-
-    def async_executor(func):
-        """
-        Decorator for asynchronous task or action executors.
-
-        Ensures proper async execution for functions that are already coroutines.
-
-        Args:
-            func: Async function to wrap
-
-        Returns:
-            Properly wrapped async function
-
-        Interface: AffordanceHandler
-        """
-
-        async def wrapper(self, *args, **kwargs):
-            return await func(self, *args, **kwargs)
-
-        return wrapper
-
-    def register_action_executor(
-        self, action_name, action_func, qos=ACTION_SUBSCRIPTION_QOS, **_
-    ):
-        """
-        Register a new action handler.
-
-        Associates an action name with a function and subscribes to the
-        corresponding MQTT topic.
-
-        Args:
-            action_name: Name of the action to register
-            action_func: Function to execute when the action is triggered
-            qos: MQTT QoS level (default: 0)
-            **_: Additional keyword arguments (ignored)
-
-        Raises:
-            ValueError: If action already exists
-
-        Interface: AffordanceHandler
-        """
-        if action_name in self._actions:
-            # self.log(f"Action {action_name} already exists.", LogLevels.WARN)
-
-        # TODO: sanitize action names
-        self._actions[action_name] = action_func
-
-        # TODO: get rid of / refactor the namespace stuff
-        self._mqtt.subscribe(
-            f"{self._base_action_topic}/{APP_NAMESPACE}/{action_name}", qos=qos
-        )
-
     def _invoke_action(self, action_name, action_input, **_):
-        """
-        Invoke an action with the specified input.
-
-        Executes either a built-in action or a user-defined action based on
-        the namespace and action name.
-
-        Args:
-            namespace: Namespace for the action
-            action_name: Name of the action to invoke
-            action_input: Input data for the action
-            **_: Additional keyword arguments (ignored)
-
-        Raises:
-            ValueError: If action handler does not exist
-
-        Interface: AffordanceHandler
-        """
         action = self._actions.get(action_name)
         if action:
             asyncio.create_task(action(action_input))
-        # else:
-            # self.log(
-            #     f"Action handler for {namespace}/{action_name} does not exist.",
-            #     LogLevels.WARN,
-            # )
+
+    async def _otau_init(self, _):
+        if self._otau:
+            return
+
+        open(OTAU_FILE, "x").close()
+        self._reset()
+
+    async def _otau_finish(self, _):
+        if not self._otau:
+            return
+
+        import os
+
+        os.remove(OTAU_FILE)
+
+        self._reset()
 
     def _wrap_vfs_action(action_func):
-        """
-        Decorator for VFS action handlers.
-
-        Wraps VFS actions to add timestamps and publish results as events.
-
-        Args:
-            action_func: VFS action function to wrap
-
-        Returns:
-            Wrapped function that publishes results
-        """
         from time import gmtime, time
 
         def builtin_action_wrapper(self, action_input):
             base = gmtime(0)[0]
             action_result = action_func(self, action_input)
             ts = time()
-            epoch_ts = {"time_base": base, "timestamp": ts} if base != 1970 else {"timestamp": ts}
+            epoch_ts = (
+                {"time_base": base, "timestamp": ts}
+                if base != 1970
+                else {"timestamp": ts}
+            )
             action_result.update({"epoch_timestamp": epoch_ts})
             self._publish(
                 f"{self._base_event_topic}/core/otau/report",
@@ -792,39 +311,8 @@ class EmbeddedCore:
 
         return builtin_action_wrapper
 
-    @sync_executor
     @_wrap_vfs_action
-    def _builtin_action_vfs_read(self, action_input):
-        """
-        Read the contents of a file from the virtual file system.
-
-        Args:
-            action_input: Dictionary containing the file path to read
-
-        Returns:
-            Dictionary with action result
-
-        Raises:
-            NotImplementedError: Must be implemented by subclasses
-
-        Interface: AffordanceHandler
-        """
-        raise NotImplementedError("Subclasses must implement builtin_action_vfs_read()")
-
-    @sync_executor
-    @_wrap_vfs_action
-    def _builtin_action_vfs_write(self, action_input):
-        """
-        Write data to a file in the virtual file system.
-
-        Args:
-            action_input: Dictionary containing path, payload, and append flag
-
-        Returns:
-            Dictionary with action result and error status
-
-        Interface: AffordanceHandler
-        """
+    async def _vfs_write(self, action_input):
         result = {"action": "write", "error": False, "message": ""}
 
         file_path = action_input.get("path")
@@ -851,9 +339,45 @@ class EmbeddedCore:
         append = action_input.get("append", False)
 
         try:
-            from ._builtins import vfs_write
+            from binascii import crc32, a2b_base64
+            import os
 
-            vfs_write(file_path, append, data, data_hash, data_hash_algo)
+            if data_hash_algo.lower() != "crc32":
+                raise NotImplementedError("Only CRC32 is supported for now.")
+
+            actual_hash = crc32(data)
+            if actual_hash != data_hash:
+                raise ValueError(
+                    f"Hash mismatch, expected {hex(data_hash)}, got {hex(actual_hash)}"
+                )
+
+            mode = "a" if append else "w"
+
+            file_path = file_path.rstrip("/")
+            path_parts = file_path.split("/")
+            file_name = path_parts[-1]
+
+            root_dir = os.getcwd()
+            file_root = path_parts[0]
+            if len(path_parts) == 1 or file_root in ["", "."]:
+                file_root = root_dir
+
+            if file_root != root_dir:
+                raise ValueError(
+                    f"Invalid file path: '{file_path}' - expected root dir to be '{root_dir} but is '{file_root}'"
+                )
+
+            path_parts = path_parts[1:]  # Skip the root directory
+            for part in path_parts[:-1]:
+                if part not in os.listdir():
+                    os.mkdir(part)
+                os.chdir(part)
+
+            with open(file_name, mode) as f:
+                f.write(a2b_base64(data))
+
+            os.chdir(root_dir)
+
             result["message"] = file_path
         except Exception as e:
             result["error"] = True
@@ -861,238 +385,40 @@ class EmbeddedCore:
 
         return result
 
-    @sync_executor
     @_wrap_vfs_action
-    def _builtin_action_vfs_list(self, action_input):
-        """
-        List the contents of the virtual file system.
-
-        Args:
-            action_input: Dictionary containing parameters for listing
-
-        Returns:
-            Dictionary with listing results
-
-        Raises:
-            NotImplementedError: Must be implemented by subclasses
-
-        Interface: AffordanceHandler
-        """
-        raise NotImplementedError("Subclasses must implement builtin_action_vfs_list()")
-
-    @sync_executor
-    @_wrap_vfs_action
-    def _builtin_action_vfs_delete(self, action_input):
-        """
-        Delete a file from the virtual file system.
-
-        Args:
-            action_input: Dictionary containing the file path to delete
-
-        Returns:
-            Dictionary with deletion result
-
-        Raises:
-            NotImplementedError: Must be implemented by subclasses
-
-        Interface: AffordanceHandler
-        """
+    async def _vfs_delete(self, action_input):
         raise NotImplementedError(
             "Subclasses must implement builtin_action_vfs_delete()"
         )
 
-    @sync_executor
-    def _builtin_action_set_property(self, action_input):
-        """
-        Set the value of a property.
-
-        Args:
-            action_input: Dictionary containing property name and value
-
-        Raises:
-            ValueError: If property is read-only or input is malformed
-
-        Interface: AffordanceHandler
-        """
-        property_name = action_input.get("pname")
-        property_value = action_input.get("pval")
-        if property_name is None or property_value is None:
-            # self.log(
-                "Malformed set_property action input. Input template: {'pname': 'name_string', 'pval': Any}",
-                LogLevels.ERROR,
-            )
-            return
-
-        if property_name in self._net_ro_props:
-            # self.log(f"Property {property_name} is read-only.", LogLevels.WARN)
-            return
-
-        self.set_property(property_name, property_value)
-
-    @sync_executor
-    def _builtin_action_reload_core(self, _):
-        """
-        Reload the core module.
-
-        Disconnects from network services and performs a soft reset of the device.
-
-        Args:
-            _: Input parameter (ignored)
-
-        Interface: AffordanceHandler
-        """
+    async def _reset(self, _):
         try:
+            self._publish(f"{self._base_property_topic}/core/status", "UNDEF", True, 1)
             self._disconnect()
         except Exception as e:
-            # self.log(f"Failed to disconnect: {e}", LogLevels.ERROR)
+            self.log(f"Failed to disconnect: {e}", LogLevels.ERROR)
 
         from machine import soft_reset
 
-        # self.log("Reloading core module...", LogLevels.WARN)
         soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
-
     def _start_scheduler(self, main_task):
-        """
-        Launch the runtime and start running all registered tasks.
-
-        Sets up the asyncio event loop with exception handling and runs
-        the main application task.
-
-        Args:
-            main_task: Primary coroutine to execute
-
-        Interface: TaskScheduler
-        """
-
         def loop_exception_handler(loop, context):
-            """
-            Handle exceptions raised in tasks.
-
-            Args:
-                loop: The event loop
-                context: Exception context
-            """
             future = context.get("future")
             msg = context.get("exception", context["message"])
 
             future_name = getattr(future, "__name__", "unknown")
 
-            # TODO: (try to) publish the error as an event
             if isinstance(msg, asyncio.CancelledError):
-                # self.log(f"{future} '{future_name}' was cancelled.", LogLevels.INFO)
-            elif isinstance(msg, Exception):
-                # self.log(
-                    f"Generic exception in {future} '{future_name}': {msg}",
-                    LogLevels.ERROR,
-                )
+                print(f"[INFO] Task {future_name} was cancelled.")
             else:
-                # self.log(
-                    f"Unknown exception in {future} '{future_name}': {msg}",
-                    LogLevels.WARN,
-                )
+                print(f"[ERROR] Task {future_name} failed: {msg}")
 
             for task_id in self._tasks:
                 if self._tasks[task_id].done():
                     del self._tasks[task_id]
 
-        # self.log("Starting task scheduler...", LogLevels.DEBUG)
         loop = asyncio.new_event_loop()
         loop.set_exception_handler(loop_exception_handler)
-
-        # self.log("Running main task...", LogLevels.DEBUG)
         loop.run_until_complete(loop.create_task(main_task))
-
-    def task_create(self, task_id, task_func, period_ms=0):
-        """
-        Register a task for execution.
-
-        Associates a unique task identifier with a callable that encapsulates the task's logic.
-
-        Args:
-            task_id: A unique identifier for the task. Must be unique across all active tasks.
-            task_func: A callable implementing the task's functionality. Should be an async
-                      function that accepts 'self' as its parameter.
-            period_ms: The period in milliseconds between consecutive executions of the task.
-                      If set to 0 (default), the task will execute only once (one-shot task).
-                      If greater than 0, the task will execute repeatedly at the specified interval.
-
-        Raises:
-            ValueError: If a task with the specified task_id already exists.
-
-        Notes:
-            - For periodic tasks, the time spent executing the task is considered when
-              calculating the next execution time.
-            - Tasks are automatically removed from the registry when they exit or raise
-              an unhandled exception.
-        """
-        if task_id in self._tasks:
-            # self.log(f"Task {task_id} already exists.", LogLevels.WARN)
-            return
-
-        async def try_wrapper():
-            try:
-                await task_func(self)
-            except asyncio.CancelledError:
-                # self.log(f"Task {task_id} was cancelled.", LogLevels.INFO)
-                return True
-            except Exception as e:
-                # self.log(f"Task {task_id} failed: {e}", LogLevels.ERROR)
-                return True
-
-            return False
-
-        async def task_wrapper():
-            while True:
-                start_time = ticks_ms()
-
-                should_exit = await try_wrapper()
-
-                elapsed_time = ticks_diff(ticks_ms(), start_time)
-                await self.task_sleep_ms(max(0, period_ms - elapsed_time))
-
-                if should_exit:
-                    break
-
-            del self._tasks[task_id]
-
-        if period_ms == 0:
-            asyncio.create_task(try_wrapper())  # One shot task
-        else:
-            self._tasks[task_id] = asyncio.create_task(task_wrapper())
-
-    def task_cancel(self, task_id):
-        """
-        Cancel a registered task.
-
-        Cancels the task identified by the given task_id.
-
-        Args:
-            task_id: The identifier of the task to cancel.
-
-        Raises:
-            ValueError: If task with the specified ID does not exist
-        """
-        if task_id not in self._tasks:
-            raise ValueError(f"Task {task_id} does not exist.")
-
-        self._tasks[task_id].cancel()
-
-    async def task_sleep_s(self, s):
-        """
-        Asynchronously sleep for the specified number of seconds.
-
-        Args:
-            s (int | float): The sleep duration in seconds.
-        """
-        await asyncio.sleep(s)
-
-    async def task_sleep_ms(self, ms):
-        """
-        Asynchronously pause execution for a specified number of milliseconds.
-
-        Args:
-            ms: Duration to sleep in milliseconds.
-        """
-        await asyncio.sleep_ms(ms)

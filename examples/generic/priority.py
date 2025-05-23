@@ -5,7 +5,7 @@ The priority of the sensor is set by the user and can be "low", "medium", or "hi
 Setting the priority is handled by the user through the CityLink Embedded Core API (topic is mqtt://{...}/actions/setPriority)
 """
 
-from citylink_core import EmbeddedCore
+from citylink.core import EmbeddedCore
 from random import randint
 
 
@@ -26,8 +26,7 @@ def simulate_random_sensor(citylink: EmbeddedCore) -> None:
     )  # "low_prio", "medium_prio", "high_prio"
 
 
-@EmbeddedCore.App()
-def main(citylink: EmbeddedCore):
+def setup(citylink: EmbeddedCore):
     """
     Initializes the sensor simulation application.
 
