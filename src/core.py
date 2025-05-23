@@ -1,8 +1,8 @@
+import json
 import asyncio
 from .const import *
 from umqtt.simple import MQTTClient
 from time import ticks_ms, ticks_diff, sleep_ms
-
 
 def _with_exponential_backoff(func, retries, base_timeout_ms):
     for i in range(retries):
@@ -21,18 +21,23 @@ def _with_exponential_backoff(func, retries, base_timeout_ms):
 
 
 def main(setup=None):
+    print("[MAIN] Starting main function...")
     otau = False
     try:
         open(OTAU_FILE, "r").close()
         otau = True
+        print("[MAIN] OTA Update mode detected.")
     except OSError:
+        print("[MAIN] No OTA Update mode detected.")
         pass
 
     core = EmbeddedCore(otau)
     if setup is None and not otau:
         print("[MAIN] [WARN] No setup function provided. Entering OTA Update mode.")
         core._otau_init()
+        return
 
+    core._init()
     core._connect()
     core._edge_con_register()
     core._setup_mqtt()
@@ -59,45 +64,21 @@ class EmbeddedCore:
         self._tasks = {}
         self._actions = {}
         self._properties = {}
+        self._config = {}
 
         self._otau = otau
         self._mqtt_ready = False
         self.is_registered = False
         self.last_publish_time = 0
 
-        # Load configuration
         try:
             with open("/config/config.json", "r") as f:
-                self.config = json.load(f)
+                self._config = json.load(f)
         except Exception as e:
             raise Exception(f"[FATAL] Failed to load configuration file: {e}") from e
 
-        self.id = self.config.get("id")
-        if self.id is None:
-            from machine import unique_id
-            from binascii import hexlify
-
-            # Id to use as part of the MQTT topics and client ID
-            self._id = hexlify(unique_id()).decode("utf-8")
-        else:
-            self.is_registered = True
-
-        if self._otau:
-            self._actions = {
-                "core/otau/write": self._vfs_write,
-                "core/otau/delete": self._vfs_delete,
-                "core/otau/finish": self._otau_finish,
-            }
-        else:
-            # if not in OTA Update mode, load existing extensions
-            self._actions = {
-                "core/otau/init": self._otau_init,
-            }
-
-            # If not in OTA Update mode, load extensions
-            for fname in os.listdir("/ext"):
-                self._load_ext(f"/ext/{fname}")
-
+        self._id = self._config.get("id")
+ 
     def _load_ext(self, fname):
         try:
             with open(fname, "r") as f:
@@ -123,11 +104,33 @@ class EmbeddedCore:
         except Exception as e:
             print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
 
+    def _init(self):
+        if self._id is None:
+            from binascii import hexlify
+            from machine import unique_id
+            self._id = hexlify(unique_id()).decode("utf-8")
+        else:
+            self.is_registered = True
+
+        if self._otau:
+            self._actions = {
+                "core/otau/write": self._vfs_write,
+                "core/otau/delete": self._vfs_delete,
+                "core/otau/finish": self._otau_finish,
+            }
+        else:
+            self._actions = {
+                "core/otau/init": self._otau_init,
+            }
+            for fname in os.listdir("/ext"):
+                self._load_ext(f"/ext/{fname}")
+
+
     def _write_config(self, update_dict):
         self._config.update(update_dict)
         try:
             with open("./config/config.json", r) as f:
-                json.dump(self.config, f)
+                json.dump(self._config, f)
         except Exception as e:
             raise Exception(f"[ERROR] Failed to write configuration file: {e}") from e
 
