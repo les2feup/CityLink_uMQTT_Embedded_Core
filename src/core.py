@@ -8,110 +8,164 @@
 #    3. receive and handle vfs write/delete
 #    4. reload on command
 
-from citylink import EmbeddedCore
-from citylink.interfaces import Serializer
-
 import asyncio
+from .const import *
+from umqtt.simple import MQTTClient
 from time import ticks_ms, ticks_diff, sleep_ms
 
-from .const import *
-from ._log import LogLevels, LogLevel
-from ._utils import get_epoch_timestamp
+def with_exponential_backoff(func, retries, base_timeout_ms):
+    # Attempts to execute a function with exponential backoff on failure.
+
+    # This function calls the provided callable, retrying up to the specified number of times.
+    # After each failure, it waits for an exponentially increasing delay starting at base_timeout_ms
+    # milliseconds. If the callable succeeds, its result is returned immediately; if all attempts fail,
+    # an Exception is raised.
+
+    # Args:
+    #    func: The callable to execute.
+    #    retries: The maximum number of retry attempts.
+    #    base_timeout_ms: The initial wait time in milliseconds, which doubles after each attempt.
+
+    # Returns:
+    #    The result of the callable if execution is successful.
+
+    # Raises:
+    #    Exception: If the callable fails on all retry attempts.
+
+    for i in range(retries):
+        retry_timeout = base_timeout_ms * (2**i)
+        # TODO: suppress this print when building for production
+        print(f"[INFO] Trying {func.__name__} (attempt {i + 1}/{retries})")
+        try:
+            return func()
+        except Exception as e:
+            print(
+                f"[ERROR] {func.__name__} failed: {e}, retrying in {retry_timeout} milliseconds"
+            )
+            sleep_ms(retry_timeout)
+
+    raise Exception(f"[ERROR] {func.__name__} failed after {retries} retries")
 
 
-class uMQTTCore(EmbeddedCore):
-    """
-    Micropython implementation of the CityLink EmbeddedCore interface
-    using MQTT over a WLAN.
-    """
+class EmbeddedCore:
+    # Micropython implementation of the CityLink EmbeddedCore interface
+    # using MQTT over a WLAN.
+
+    def _load_ext(self, fname, **kwargs):
+        # Load an external module.
+
+        # Args:
+        #    fname: Name of the external module to load
+        #    **kwargs: Additional keyword arguments (ignored)
+        try:
+            with open(fname, "r") as f:
+                code = f.read()
+
+            g = {}  # Global namespace for exec
+            exec(code, g)
+            ext_class = g.get("EmbeddedCoreExt")
+            if not ext_class:
+                return
+
+            init_method = ext_class.__dict__.get("__init__")
+            if init_method and callable(init_method):
+                try:
+                    init_method(self, **kwargs)
+                except TypeError as e:
+                    print(f"[ERROR] [_load_ext] __init__ call failed for {fname}: {e}")
+                    return
+
+            for name, member in ext_class.__dict__.items():
+                if callable(member) and name != "__init__":
+                    bound_method = (
+                        lambda self_inst=self, func=member: lambda *a, **kw: func(
+                            self_inst, *a, **kw
+                        )
+                    )
+                    setattr(self, name, bound_method())
+
+        except OSError as e:
+            print(f"[ERROR] [_load_ext] Err opening/reading {fname}: {e}")
+        except Exception as e:
+            print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
 
     def __init__(
         self,
-        config_dir,
-        fopen_mode=DEFAULT_FOPEN_MODE,
-        serializer: Serializer = DEFAULT_SERIALIZER,
-        **_,
+        otau=False,
+        **kwargs,
     ):
-        """
-        Initialize the uMQTTCore with configuration and serialization parameters.
+        # Initialize the uMQTTCore with configuration and serialization parameters.
 
-        Args:
-            config_dir: Directory containing configuration files
-            fopen_mode: File open mode (default: "r")
-            serializer: Object with dumps/loads methods for serialization (default: json)
-            **_: Additional keyword arguments (ignored)
-        """
-        self._config_dir = config_dir
-        self._fopen_mode = fopen_mode
-        self._serializer = serializer
+        # Args:
+        #    config_dir: Directory containing configuration files
+        #    fopen_mode: File open mode (default: "r")
+        #    serializer: Object with dumps/loads methods for serialization (default: json)
+        #    **_: Additional keyword arguments (ignored)
 
-        self._tasks = {}
-        self._actions = {}
-        self._properties = {}
-        self._net_ro_props = set()
+        # self._tasks = {}
+        # self._actions = {}
+        # self._properties = {}
+        # self._net_ro_props = set()
 
-        self._builtin_actions = {
-            "vfs/list": self._builtin_action_vfs_list,
-            "vfs/read": self._builtin_action_vfs_read,
-            "vfs/write": self._builtin_action_vfs_write,
-            "vfs/delete": self._builtin_action_vfs_delete,
-            "reload": self._builtin_action_reload_core,
-            "set_property": self._builtin_action_set_property,
+        # self._builtin_actions = {
+        #     "vfs/list": self._builtin_action_vfs_list,
+        #     "vfs/read": self._builtin_action_vfs_read,
+        #     "vfs/write": self._builtin_action_vfs_write,
+        #     "vfs/delete": self._builtin_action_vfs_delete,
+        #     "reload": self._builtin_action_reload_core,
+        #     "set_property": self._builtin_action_set_property,
+        # }
+        self._otau = otau
+        self._core_props = {
+            "core/log_level": DEFAULT_LOG_LEVEL,
+            "core/status": STATUS_UNDEFINED,
         }
 
-        self._builtin_properties = {
-            "log_level": DEFAULT_LOG_LEVEL,
-            "status": STATUS_UNDEFINED,
-        }
-
-        self.is_registered = False
         self._mqtt_ready = False
+        self.is_registered = False
         self.last_publish_time = 0
 
-    #NOTE: optimizing for size. supressing serializer interface
-    def _load_config(self):
-        """
-        Load the configuration from the specified directory.
-
-        Loads configuration files from the specified directory and sets up
-        the device ID. If no ID exists, generates one from the device's unique ID.
-
-        Interface: EmbeddedCore
-        """
+        # Load configuration
         try:
             with open("./config/config.json", "r") as f:
                 self.config = json.load(f)
         except Exception as e:
-            raise Exception(f"[ERROR] Failed to load configuration file: {e}") from e
+            raise Exception(f"[FATAL] Failed to load configuration file: {e}") from e
 
-        log_level = LogLevels.from_str(self._config.get("log_level"))
-        if log_level is None:
-            self.log_level = DEFAULT_LOG_LEVEL
+        self.id = self.config.get("id")
+        if self.id is None:
+            from machine import unique_id
+            from binascii import hexlify
 
-        self._id = self._config.get(id")
-        if self._id is not None:
+            # Id to use as part of the MQTT topics and client ID
+            self._id = hexlify(unique_id()).decode("utf-8")
+        else:
             self.is_registered = True
-            return
 
-        from machine import unique_id
-        from binascii import hexlify
+        # Load extentions
+        self._actions = {}
+        if self._otau:
+            self._actions = {
+                "core/otau/write": self._vfs_write,
+                "core/otau/delete": self._vfs_delete,
+                "core/reload": self._vfs_reload,
+            }
+        else:
+            # If not in OTA Update mode, load existing extensions
+            for fname in os.listdir("./ext"):
+                self._load_ext(f"./ext/{fname}", **kwargs)
 
-        # Id to use as part of the MQTT topics and client ID
-        self._id = hexlify(unique_id()).decode(MQTT_TOPIC_ENCODING)
-
-    #NOTE: optimizing for size. supressing serializer interface
+    # NOTE: optimizing for size. supressing serializer interface
     def _write_config(self, update_dict):
-        """
-        Write the configuration to the specified directory.
+        # Write the configuration to the specified directory.
 
-        Updates the current configuration with provided dictionary
-        and persists it to storage.
+        # Updates the current configuration with provided dictionary
+        # and persists it to storage.
 
-        Args:
-            update_dict: Dictionary containing configuration updates
+        # Args:
+        #    update_dict: Dictionary containing configuration updates
 
-        Interface: EmbeddedCore
-        """
+        # Interface: EmbeddedCore
         self._config.update(update_dict)
         try:
             with open("./config/config.json", r) as f:
@@ -119,60 +173,49 @@ class uMQTTCore(EmbeddedCore):
         except Exception as e:
             raise Exception(f"[ERROR] Failed to write configuration file: {e}") from e
 
-        # from ._config import write_configuration
-        #
-        # write_configuration(
-        #     self._config, self._config_dir, self._fopen_mode, self._serializer
-        # )
-
-    #TODO: optimize for size. leave only the essential parts necessary for OTA updates
-    #      move the rest to a separate file
     def _connect(self):
-        """
-        Attempt to connect to the Edge Connector.
-        In this concrete implementation, this function connects to the WLAN network
-        and then to the MQTT Broker.
+        # Attempt to connect to the Edge Connector.
+        # In this concrete implementation, this function connects to the WLAN network
+        # and then to the MQTT Broker.
 
-        Establishes connections to the configured WiFi network and MQTT broker
-        with exponential backoff for retries.
+        # Establishes connections to the configured WiFi network and MQTT broker
+        # with exponential backoff for retries.
 
-        Interface: EmbeddedCore
-        """
-        broker_config = self._config["runtime"]["broker"]
+        # Interface: EmbeddedCore
 
-        con_retries = self._config["runtime"]["connection"].get(
-            "retries", DEFAULT_CON_RETRIES
+        import network
+
+        net_conf = self._config["network"]
+        self.wlan = network.WLAN(network.STA_IF)
+        self.wlan.active(True)
+        self.wlan.connect(net_conf["ssid"], net_conf["password"])
+
+        broker_conf = self._config["runtime"]["broker"]
+        self._mqtt = MQTTClient(
+            client_id=client_id,
+            server=broker_conf["hostname"],
+            port=broker_conf.get("port", 1883),
+            user=broker_conf.get("username"),
+            password=broker_conf.get("password"),
+            keepalive=broker_conf.get("keepalive", 60),
+            ssl=broker_conf.get("ssl"),
         )
-        con_timeout_ms = self._config["runtime"]["connection"].get(
-            "timeout_ms", DEFAULT_CON_TIMEOUT_MS
-        )
 
-        from ._setup import initialize_mqtt_client, init_wlan
-
-        self._wlan = init_wlan(self._config["network"])
-        self._mqtt = initialize_mqtt_client(self._id, broker_config)
-
-        ssid = self._config["network"]["ssid"]
-
-        def connect_wlan():
+        def check_wlan():
             if not self._wlan.isconnected():
-                raise Exception(f"connecting to `{ssid}` WLAN")
-            self.log(f"connected to `{ssid}` WLAN", LogLevels.INFO)
+                raise Exception(f"WiFi Connecting")
 
-        def connect_mqtt():
+        retries = self._config["runtime"]["connection"].get("retries", 3)
+        timeout_ms = self._config["runtime"]["connection"].get("timeout_ms", 5000)
+        with_exponential_backoff(check_wlan, retries, timeout_ms)
+        with_exponential_backoff(
             self._mqtt.connect(
-                broker_config.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
-                con_timeout_ms,
-            )
-            self.log(
-                f"connected to MQTT broker at {broker_config['hostname']}",
-                LogLevels.INFO,
-            )
-
-        from ._utils import with_exponential_backoff
-
-        with_exponential_backoff(connect_wlan, con_retries, con_timeout_ms)
-        with_exponential_backoff(connect_mqtt, con_retries, con_timeout_ms)
+                broker_conf.get("clean_session", DEFAULT_MQTT_CLEAN_SESSION),
+                timeout_ms,
+            ),
+            retries,
+            timeout_ms,
+        )
 
     def _disconnect(self):
         """
@@ -199,33 +242,33 @@ class uMQTTCore(EmbeddedCore):
         self._mqtt.publish(topic, payload, retain=retain, qos=qos)
         self.last_publish_time = ticks_ms()
 
-    #TODO: move this to a separate module
-    def log(self, msg, level=DEFAULT_LOG_LEVEL):
-        if level not in LogLevels:
-            log(f"Invalid log level: {level}", LogLevels.ERROR)
-
-        if level < self.log_level:
-            return
-
-        print(f"[{level}] {msg}")
-
-        if not self._mqtt_ready:
-            return
-
-        try:
-            self._emit_event(
-                "log",
-                {
-                    "level": str(level),
-                    "message": msg,
-                    "epoch_timestamp": get_epoch_timestamp(),
-                },
-                False,
-                EVENT_QOS,
-                core_event=True,
-            )
-        except Exception as e:
-            print(f"[ERROR] Failed to emit log event: {e}")
+    # # TODO: move this to a separate module
+    # def log(self, msg, level=DEFAULT_LOG_LEVEL):
+    #     if level not in LogLevels:
+    #         log(f"Invalid log level: {level}", LogLevels.ERROR)
+    #
+    #     if level < # self.log_level:
+    #         return
+    #
+    #     print(f"[{level}] {msg}")
+    #
+    #     if not self._mqtt_ready:
+    #         return
+    #
+    #     try:
+    #         self._emit_event(
+    #             "log",
+    #             {
+    #                 "level": str(level),
+    #                 "message": msg,
+    #                 "epoch_timestamp": get_epoch_timestamp(),
+    #             },
+    #             False,
+    #             EVENT_QOS,
+    #             core_event=True,
+    #         )
+    #     except Exception as e:
+    #         print(f"[ERROR] Failed to emit log event: {e}")
 
     def _listen(self):
         """
@@ -245,25 +288,23 @@ class uMQTTCore(EmbeddedCore):
             self._mqtt.ping()
             self.last_publish_time = ticks_ms()
 
-    #TODO: simplify logic as much as possible
+    # TODO: simplify logic as much as possible
     #      suppress unnecessary logging
     def _register_device(self):
-        """
-        Register the device with the WoT servient.
+        #Register the device with the Edge Connector
 
-        Sends registration request to the WoT servient and waits for confirmation.
-        If already registered, skips the registration process.
+        #Sends registration request to the WoT servient and waits for confirmation.
+        #If already registered, skips the registration process.
 
-        Interface: EmbeddedCore
-        """
-        self.log("Inside register_device()", LogLevels.DEBUG)
+        #Interface: EmbeddedCore
+        # self.log("Inside register_device()", LogLevels.DEBUG)
 
         if self.is_registered:
-            self.log(f"Device already registered with ID: {self._id}", LogLevels.INFO)
+            # self.log(f"Device already registered with ID: {self._id}", LogLevels.INFO)
             return
 
         registration_payload = self._serializer.dumps(self._config["reg"])
-        self.log(f"Registration payload: {registration_payload}", LogLevels.DEBUG)
+        # self.log(f"Registration payload: {registration_payload}", LogLevels.DEBUG)
         registering = False
 
         def on_registration(topic, payload):
@@ -276,41 +317,41 @@ class uMQTTCore(EmbeddedCore):
 
             topic = topic.decode(MQTT_TOPIC_ENCODING)
             payload = self._serializer.loads(payload)
-            self.log(f"Received registration ack: {payload}", LogLevels.DEBUG)
+            # # self.log(f"Received registration ack: {payload}", LogLevels.DEBUG)
 
             if topic != f"citylink/{self._id}/registration/ack":
-                self.log(f"Unexpected registration topic: {topic}", LogLevels.WARN)
+                # # self.log(f"Unexpected registration topic: {topic}", LogLevels.WARN)
                 registering = False
                 return
 
             if payload["status"] != "success":
                 # //TODO: handle better the schema validation
-                self.log(
-                    f"Failed to register device: {payload['message']}", LogLevels.ERROR
-                )
+                # # self.log(
+                #     f"Failed to register device: {payload['message']}", LogLevels.ERROR
+                # )
                 registering = False
                 return
 
             self._id = payload["id"]
-            self.log(
-                f"Device registered successfully with ID: {self._id}", LogLevels.INFO
-            )
+            # # self.log(
+            #     f"Device registered successfully with ID: {self._id}", LogLevels.INFO
+            # )
             self._write_config({"id": self._id})
-            self.log(f"Device ID written to config", LogLevels.DEBUG)
+            # # self.log(f"Device ID written to config", LogLevels.DEBUG)
             self.is_registered = True
 
-        self.log("Registering device...", LogLevels.INFO)
+        # # self.log("Registering device...", LogLevels.INFO)
         self._mqtt.set_callback(on_registration)
-        self.log("Subscribing to registration ack topic...", LogLevels.DEBUG)
+        # # self.log("Subscribing to registration ack topic...", LogLevels.DEBUG)
         self._mqtt.subscribe(
             f"citylink/{self._id}/registration/ack", CORE_SUBSCRIPTION_QOS
         )
 
-        self.log("Waiting for registration ack...", LogLevels.DEBUG)
+        # # self.log("Waiting for registration ack...", LogLevels.DEBUG)
         time_passed = 0
         while not self.is_registered and not registering:
             if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
-                self.log("Publishing registration message", LogLevels.DEBUG)
+                # # self.log("Publishing registration message", LogLevels.DEBUG)
                 self._publish(
                     f"citylink/{self._id}/registration",
                     registration_payload,
@@ -324,15 +365,13 @@ class uMQTTCore(EmbeddedCore):
 
     # TODO: only OTA stuff. move the rest to a separate file
     def _setup_mqtt(self):
-        """
-        Set up MQTT topic structure and message handling.
+        #Set up MQTT topic structure and message handling.
 
-        Configures MQTT callbacks and topic subscriptions for action handling.
-        """
+        #Configures MQTT callbacks and topic subscriptions for action handling.
         from ._setup import mqtt_setup
 
         def on_message(topic, payload):
-            topic = topic.decode(MQTT_TOPIC_ENCODING)
+            topic = topic.decode("utf-8")
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
@@ -342,16 +381,25 @@ class uMQTTCore(EmbeddedCore):
             action_input = None
             if payload != b"":
                 try:
-                    action_input = self._serializer.loads(payload)
+                    action_input = json.loads(payload)
                 except Exception as e:
-                    self.log(f"Failed to deserialize payload: {e}", LogLevels.ERROR)
+                    # # self.log(f"Failed to deserialize payload: {e}", LogLevels.ERROR)
                     return
 
             self._invoke_action(namespace, action_name, action_input)
 
-        self._base_event_topic, self._base_action_topic, self._base_property_topic = (
-            mqtt_setup(self._id, RT_NAMESPACE, self._mqtt, on_message)
-        )
+
+        self.mqtt.set_callback(on_message)
+
+        base = f"citylink/{self._id}"
+        self._base_event_topic = f"{base}/events"
+        self._base_action_topic = f"{base}/actions"
+        self._base_property_topic = f"{base}/properties"
+
+        if self._otau:
+            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=2)
+            self.mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=2)
+            self.mqtt.subscribe(f"{self._base_action_topic}/core/reload", qos=2)
 
         self._mqtt_ready = True
 
@@ -455,7 +503,7 @@ class uMQTTCore(EmbeddedCore):
         Interface: AffordanceHandler
         """
         if property_name in self._properties:
-            self.log(
+            # self.log(
                 f"Property {property_name} already exists. Set a new value using 'set_property'",
                 LogLevels.WARN,
             )
@@ -483,7 +531,7 @@ class uMQTTCore(EmbeddedCore):
         Interface: AffordanceHandler
         """
         if property_name not in self._properties:
-            self.log(
+            # self.log(
                 f"Property {property_name} does not exist. Create it using 'create_property' method.",
                 LogLevels.WARN,
             )
@@ -502,8 +550,8 @@ class uMQTTCore(EmbeddedCore):
         map = None
         namespace = None
 
-        if core_prop and property_name in self._builtin_properties:
-            map = self._builtin_properties
+        if core_prop and property_name in self._core_props:
+            map = self._core_props
             namespace = RT_NAMESPACE
         if not core_prop and property_name in self._properties:
             map = self._properties
@@ -511,12 +559,12 @@ class uMQTTCore(EmbeddedCore):
 
         if map is None or namespace is None:
             # TODO: Log the error
-            self.log(f"Property {property_name} does not exist.", LogLevels.WARN)
+            # self.log(f"Property {property_name} does not exist.", LogLevels.WARN)
             return
 
         if not isinstance(value, type(map[property_name])):
             # TODO: Log the error
-            self.log(
+            # self.log(
                 f"Error setting: '{namespace}/{property_name}' expected {type(map[property_name]).__name__} type, got {type(value).__name__}",
                 LogLevels.ERROR,
             )
@@ -533,7 +581,7 @@ class uMQTTCore(EmbeddedCore):
         try:
             self._publish(topic, payload, retain=retain, qos=qos)
         except Exception as e:
-            self.log(f"Failed to publish property update: {e}", LogLevels.ERROR)
+            # self.log(f"Failed to publish property update: {e}", LogLevels.ERROR)
 
     def set_property(
         self,
@@ -678,7 +726,7 @@ class uMQTTCore(EmbeddedCore):
         Interface: AffordanceHandler
         """
         if action_name in self._actions:
-            self.log(f"Action {action_name} already exists.", LogLevels.WARN)
+            # self.log(f"Action {action_name} already exists.", LogLevels.WARN)
 
         # TODO: sanitize action names
         self._actions[action_name] = action_func
@@ -688,7 +736,7 @@ class uMQTTCore(EmbeddedCore):
             f"{self._base_action_topic}/{APP_NAMESPACE}/{action_name}", qos=qos
         )
 
-    def _invoke_action(self, namespace, action_name, action_input, **_):
+    def _invoke_action(self, action_name, action_input, **_):
         """
         Invoke an action with the specified input.
 
@@ -706,17 +754,14 @@ class uMQTTCore(EmbeddedCore):
 
         Interface: AffordanceHandler
         """
-        if namespace == RT_NAMESPACE and action_name in self._builtin_actions:
-            asyncio.create_task(self._builtin_actions[action_name](action_input))
-
-        elif action_name in self._actions:
-            asyncio.create_task(self._actions[action_name](self, action_input))
-
-        else:
-            self.log(
-                f"Action handler for {namespace}/{action_name} does not exist.",
-                LogLevels.WARN,
-            )
+        action = self._actions.get(action_name)
+        if action:
+            asyncio.create_task(action(action_input))
+        # else:
+            # self.log(
+            #     f"Action handler for {namespace}/{action_name} does not exist.",
+            #     LogLevels.WARN,
+            # )
 
     def _wrap_vfs_action(action_func):
         """
@@ -730,14 +775,17 @@ class uMQTTCore(EmbeddedCore):
         Returns:
             Wrapped function that publishes results
         """
+        from time import gmtime, time
 
         def builtin_action_wrapper(self, action_input):
+            base = gmtime(0)[0]
             action_result = action_func(self, action_input)
-            action_result.update({"epoch_timestamp": get_epoch_timestamp()})
-            action_result = self._serializer.dumps(action_result)
+            ts = time()
+            epoch_ts = {"time_base": base, "timestamp": ts} if base != 1970 else {"timestamp": ts}
+            action_result.update({"epoch_timestamp": epoch_ts})
             self._publish(
-                f"{self._base_event_topic}/{RT_NAMESPACE}/vfs/report",
-                action_result,
+                f"{self._base_event_topic}/core/otau/report",
+                json.dumps(action_result),
                 retain=False,
                 qos=1,
             )
@@ -869,14 +917,14 @@ class uMQTTCore(EmbeddedCore):
         property_name = action_input.get("pname")
         property_value = action_input.get("pval")
         if property_name is None or property_value is None:
-            self.log(
+            # self.log(
                 "Malformed set_property action input. Input template: {'pname': 'name_string', 'pval': Any}",
                 LogLevels.ERROR,
             )
             return
 
         if property_name in self._net_ro_props:
-            self.log(f"Property {property_name} is read-only.", LogLevels.WARN)
+            # self.log(f"Property {property_name} is read-only.", LogLevels.WARN)
             return
 
         self.set_property(property_name, property_value)
@@ -896,11 +944,11 @@ class uMQTTCore(EmbeddedCore):
         try:
             self._disconnect()
         except Exception as e:
-            self.log(f"Failed to disconnect: {e}", LogLevels.ERROR)
+            # self.log(f"Failed to disconnect: {e}", LogLevels.ERROR)
 
         from machine import soft_reset
 
-        self.log("Reloading core module...", LogLevels.WARN)
+        # self.log("Reloading core module...", LogLevels.WARN)
         soft_reset()
 
     ## TASK SCHEDULER INTERFACE ##
@@ -933,14 +981,14 @@ class uMQTTCore(EmbeddedCore):
 
             # TODO: (try to) publish the error as an event
             if isinstance(msg, asyncio.CancelledError):
-                self.log(f"{future} '{future_name}' was cancelled.", LogLevels.INFO)
+                # self.log(f"{future} '{future_name}' was cancelled.", LogLevels.INFO)
             elif isinstance(msg, Exception):
-                self.log(
+                # self.log(
                     f"Generic exception in {future} '{future_name}': {msg}",
                     LogLevels.ERROR,
                 )
             else:
-                self.log(
+                # self.log(
                     f"Unknown exception in {future} '{future_name}': {msg}",
                     LogLevels.WARN,
                 )
@@ -949,11 +997,11 @@ class uMQTTCore(EmbeddedCore):
                 if self._tasks[task_id].done():
                     del self._tasks[task_id]
 
-        self.log("Starting task scheduler...", LogLevels.DEBUG)
+        # self.log("Starting task scheduler...", LogLevels.DEBUG)
         loop = asyncio.new_event_loop()
         loop.set_exception_handler(loop_exception_handler)
 
-        self.log("Running main task...", LogLevels.DEBUG)
+        # self.log("Running main task...", LogLevels.DEBUG)
         loop.run_until_complete(loop.create_task(main_task))
 
     def task_create(self, task_id, task_func, period_ms=0):
@@ -980,17 +1028,17 @@ class uMQTTCore(EmbeddedCore):
               an unhandled exception.
         """
         if task_id in self._tasks:
-            self.log(f"Task {task_id} already exists.", LogLevels.WARN)
+            # self.log(f"Task {task_id} already exists.", LogLevels.WARN)
             return
 
         async def try_wrapper():
             try:
                 await task_func(self)
             except asyncio.CancelledError:
-                self.log(f"Task {task_id} was cancelled.", LogLevels.INFO)
+                # self.log(f"Task {task_id} was cancelled.", LogLevels.INFO)
                 return True
             except Exception as e:
-                self.log(f"Task {task_id} failed: {e}", LogLevels.ERROR)
+                # self.log(f"Task {task_id} failed: {e}", LogLevels.ERROR)
                 return True
 
             return False
