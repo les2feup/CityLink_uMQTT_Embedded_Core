@@ -140,7 +140,7 @@ class EmbeddedCore:
     def _update_config(self, update_dict):
         self._config.update(update_dict)
         try:
-            with open("./config/config.json", "r") as f:
+            with open("./config/config.json", "w") as f:
                 json.dump(self._config, f)
         except Exception as e:
             raise Exception(f"[ERROR] Failed to write configuration file: {e}") from e
@@ -230,7 +230,7 @@ class EmbeddedCore:
 
             elif reg_status == "success" and reg_id is not None:
                 print("[INFO] Registration successful with new ID:", reg_id)
-                self._id = id
+                self._id = reg_id
                 self._update_config({"id": self._id})
                 is_registered = True
 
