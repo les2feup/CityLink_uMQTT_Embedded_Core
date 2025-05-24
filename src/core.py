@@ -246,8 +246,8 @@ class EmbeddedCore:
         self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", qos=1)
 
         time_passed = 0
-        while not is_registered and not registering:
-            if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
+        while not is_registered:
+            if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0 and not registering:
                 self._publish(
                     f"citylink/{self._id}/registration",
                     registration_payload,
@@ -258,6 +258,7 @@ class EmbeddedCore:
             self._listen()
             sleep_ms(POLLING_INTERVAL_MS)
             time_passed += POLLING_INTERVAL_MS
+            print("[DEBUG] Waiting for registration ack...")
 
     def _setup_mqtt(self):
         base = f"citylink/{self._id}"
