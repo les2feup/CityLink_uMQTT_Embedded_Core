@@ -2,8 +2,9 @@ import os
 import json
 import asyncio
 from .const import *
+from machine import unique_id
 from umqtt.simple import MQTTClient
-from binascii import crc32, a2b_base64
+from binascii import crc32, a2b_base64, hexlify
 from time import ticks_ms, ticks_diff, sleep_ms, gmtime, time
 
 
@@ -72,7 +73,6 @@ class EmbeddedCore:
 
         self._otau = otau
         self._mqtt_ready = False
-        self.is_registered = False
         self.last_publish_time = 0
 
         try:
@@ -81,12 +81,11 @@ class EmbeddedCore:
         except Exception as e:
             raise Exception(f"[FATAL] Failed to load configuration file: {e}") from e
 
-        self._id = self._config.get("id")
+        self._id = self._config.get("id", hexlify(unique_id()).decode("utf-8"))
 
     def _load_ext(self, fname):
         ext_class = None
-        module_name = None
-
+        module_name = update
         try:
             print(f"[INFO] Loading extension: {fname}")
             if fname.endswith(".py"):
@@ -122,14 +121,6 @@ class EmbeddedCore:
             print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
 
     def _init(self):
-        if self._id is None:
-            from binascii import hexlify
-            from machine import unique_id
-
-            self._id = hexlify(unique_id()).decode("utf-8")
-        else:
-            self.is_registered = True
-
         if self._otau:
             self._actions = {
                 "core/otau/write": self._vfs_write,
@@ -146,7 +137,7 @@ class EmbeddedCore:
             except Exception as e:
                 raise Exception(f"[FATAL] Failed to load extensions: {e}") from e
 
-    def _write_config(self, update_dict):
+    def _update_config(self, update_dict):
         self._config.update(update_dict)
         try:
             with open("./config/config.json", "r") as f:
@@ -208,17 +199,16 @@ class EmbeddedCore:
             self.last_publish_time = ticks_ms()
 
     def _edge_con_register(self):
-        if self.is_registered:
-            return
-
         registration_payload = json.dumps(self._config["reg"])
         registering = False
+        is_registered = False
 
         # TODO: handle better the schema validation
         def on_registration(topic, payload):
             nonlocal registering
+            nonlocal is_registered
 
-            if self.is_registered or registering:
+            if is_registered or registering:
                 return
 
             registering = True
@@ -230,19 +220,33 @@ class EmbeddedCore:
                 registering = False
                 return
 
-            if payload["status"] != "success":
-                registering = False
-                return
+            reg_id = payload.get("id", None)
+            reg_message = payload.get("message", "Unknown message")
+            reg_status = payload.get("status", None)
 
-            self._id = payload["id"]
-            self._write_config({"id": self._id})
-            self.is_registered = True
+            if reg_status == "ack":
+                print("[INFO] Registration acknowledged by the broker.")
+                is_registered = True
+
+            elif reg_status == "success" and reg_id is not None:
+                print("[INFO] Registration successful with new ID:", reg_id)
+                self._id = id
+                self._update_config({"id": self._id})
+                is_registered = True
+
+            elif reg_status == "error":
+                print("[ERROR] Registration error:", reg_message)
+                registering = False
+
+            else:
+                print("[ERROR] Malformed registration ack:", payload)
+                registering = False
 
         self._mqtt.set_callback(on_registration)
         self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", qos=1)
 
         time_passed = 0
-        while not self.is_registered and not registering:
+        while not is_registered and not registering:
             if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0:
                 self._publish(
                     f"citylink/{self._id}/registration",
