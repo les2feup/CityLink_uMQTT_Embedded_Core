@@ -195,20 +195,20 @@ class EmbeddedCore:
         self._mqtt.check_msg()
 
         if ticks_diff(ticks_ms(), self.last_publish_time) >= PING_TIMEOUT_MS:
+            print("[DEBUG] Pinging MQTT broker...")
             self._mqtt.ping()
             self.last_publish_time = ticks_ms()
 
     def _edge_con_register(self):
-        registration_payload = json.dumps(self._config["reg"])
-        registering = False
-        is_registered = False
+        acked = False
+        registered = False
+        parsing_msg = False
 
         # TODO: handle better the schema validation
         def on_registration(topic, payload):
-            nonlocal registering
-            nonlocal is_registered
+            nonlocal acked, parsing_msg, registered
 
-            if is_registered or registering:
+            if registered or parsing_msg:
                 return
 
             registering = True
@@ -220,34 +220,45 @@ class EmbeddedCore:
                 registering = False
                 return
 
-            reg_id = payload.get("id", None)
-            reg_message = payload.get("message", "Unknown message")
             reg_status = payload.get("status", None)
-
             if reg_status == "ack":
                 print("[INFO] Registration acknowledged by the broker.")
-                is_registered = True
+                acked = True
 
-            elif reg_status == "success" and reg_id is not None:
-                print("[INFO] Registration successful with new ID:", reg_id)
-                self._id = reg_id
-                self._update_config({"id": self._id})
-                is_registered = True
+            elif reg_status == "success":
+                reg_id = payload.get("id", None)
+                print("[INFO] Registration success received from broker.")
+
+                if reg_id is not None:
+                    self._id = reg_id
+                    self._update_config({"id": self._id})
+                    print("[INFO] Updated device ID in configuration: ", self._id)
+
+                registered = True
 
             elif reg_status == "error":
-                print("[ERROR] Registration error:", reg_message)
-                registering = False
+                print(
+                    "[ERROR] Registration error:",
+                    payload.get("message", "Unknown error"),
+                )
 
             else:
                 print("[ERROR] Malformed registration ack:", payload)
-                registering = False
+
+            parsing_msg = False
 
         self._mqtt.set_callback(on_registration)
         self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", qos=1)
 
+        print("[DEBUG] Waiting for registration ack...")
         time_passed = 0
-        while not is_registered:
-            if time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0 and not registering:
+        registration_payload = json.dumps(self._config["reg"])
+        while not registered:
+            if (
+                time_passed % REGISTRATION_PUBLISH_INTERVAL_MS == 0
+                and not parsing_msg
+                and not acked
+            ):
                 self._publish(
                     f"citylink/{self._id}/registration",
                     registration_payload,
@@ -258,7 +269,6 @@ class EmbeddedCore:
             self._listen()
             sleep_ms(POLLING_INTERVAL_MS)
             time_passed += POLLING_INTERVAL_MS
-            print("[DEBUG] Waiting for registration ack...")
 
     def _setup_mqtt(self):
         base = f"citylink/{self._id}"
