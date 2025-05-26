@@ -310,7 +310,9 @@ class EmbeddedCore:
 
             action = self._actions.get(action_name)
             try:
-                if action:
+                if action and action_name.startswith("core"):
+                    asyncio.create_task(action(action_input))
+                elif action and action_name.startswith("app"):
                     asyncio.create_task(action(self, action_input))
                 else:
                     print(f"[ERROR] Action '{action_name}' not found.")
@@ -344,10 +346,10 @@ class EmbeddedCore:
         self._reset()
 
     def _wrap_vfs_action(action_func):
-        async def wrapper(action_input):
+        async def wrapper(self, action_input):
             base = gmtime(0)[0]
             output = {
-                "result": await action_func(action_input),
+                "result": await action_func(self, action_input),
                 "timestamp": (
                     {"epoch_year": base, "seconds": time()}
                     if base != 1970
