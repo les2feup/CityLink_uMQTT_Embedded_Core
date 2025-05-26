@@ -1,5 +1,11 @@
+import json
+import asyncio
+
+
 ## AFFORDANCE HANDLER INTERFACE ##
 class EmbeddedCoreExt:
+    __static__ = ["sync_executor", "async_executor"]
+
     def create_property(self, property_name, initial_value, default_setter=True, **_):
         if property_name in self._properties:
             return
@@ -16,8 +22,8 @@ class EmbeddedCoreExt:
         self,
         property_name,
         value,
-        retain,
-        qos,
+        retain=True,
+        qos=0,
         **_,
     ):
         if property_name not in self._properties:
@@ -43,14 +49,23 @@ class EmbeddedCoreExt:
         self,
         event_name,
         event_data,
-        retain,
-        qos,
+        retain=False,
+        qos=0,
         **_,
     ):
         # TODO: sanitize event names
         topic = f"{self._base_event_topic}/app/{event_name}"
         payload = json.dumps(event_data)
         self._publish(topic, payload, retain, qos)
+
+    def register_action_executor(self, action_name, action_func, qos=0, **_):
+        if action_name in self._actions:
+            return
+
+        # TODO: sanitize action names
+        self._actions[f"app/{action_name}"] = action_func
+
+        self._mqtt.subscribe(f"{self._base_action_topic}/app/{action_name}", qos=qos)
 
     def sync_executor(func):
         async def wrapper(self, *args, **kwargs):
@@ -61,17 +76,6 @@ class EmbeddedCoreExt:
     def async_executor(func):
         async def wrapper(self, *args, **kwargs):
             return await func(self, *args, **kwargs)
-
-        return wrapper
-
-    def register_action_executor(self, action_name, action_func, qos=0, **_):
-        if action_name in self._actions:
-            return
-
-        # TODO: sanitize action names
-        self._actions[action_name] = action_func
-
-        self._mqtt.subscribe(f"{self._base_action_topic}/app/{action_name}", qos=qos)
 
     # async def _builtin_action_set_property(self, action_input):
     #     """

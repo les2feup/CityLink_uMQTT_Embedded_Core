@@ -24,9 +24,9 @@ def _with_exponential_backoff(func, retries, base_timeout_ms):
     raise Exception(f"[ERROR] {func.__name__} failed after {retries} retries")
 
 
-def main(setup=None):
+def main():
     print("[MAIN] Starting main function...")
-    otau_mode = True if setup is None else False
+    otau_mode = False
     try:
         open(OTAU_FILE, "r").close()
         print("[MAIN] OTA Update mode detected.")
@@ -34,10 +34,6 @@ def main(setup=None):
     except Exception:
         if otau_mode:
             print("[MAIN] No setup provided, forcing OTA Update mode.")
-            try:
-                open(OTAU_FILE, "x").close()
-            except Exception as e:
-                raise Exception("[FATAL] Failed to create OTA file.") from e
         print("[MAIN] No OTA Update mode detected.")
 
     core = EmbeddedCore(otau_mode)
@@ -45,14 +41,27 @@ def main(setup=None):
     core._init()
     core._connect()
     core._edge_con_register()
-    core._setup_mqtt()
+
+    def run_setup(core):
+        try:
+            from main import setup
+
+            setup(core)
+        except Exception as e:
+            print(f"[FATAL] Failed to run user setup function: {e}")
+            open(OTAU_FILE, "x").close()
+            raise Exception("Forcing OTA Update mode") from e
 
     async def main_task():
+        print("[INFO] Async loop started.")
+
+        core._setup_mqtt()
+
         topic = f"{core._base_property_topic}/core/status"
         if otau_mode:
             core._publish(topic, "OTAU", True, 1)
         else:
-            setup(core)
+            run_setup(core)
             core._publish(topic, "APP", True, 1)
 
         while True:
@@ -85,7 +94,7 @@ class EmbeddedCore:
 
     def _load_ext(self, fname):
         ext_class = None
-        module_name = update
+        module_name = None
         try:
             print(f"[INFO] Loading extension: {fname}")
             if fname.endswith(".py"):
@@ -104,16 +113,21 @@ class EmbeddedCore:
                 print(f"[ERROR] [_load_ext] No EmbeddedCoreExt class found in {fname}")
                 return
 
+            static_methods = getattr(ext_class, "__static__", None)
+
             for name, member in ext_class.__dict__.items():
-                if callable(member) and name != "_install":
-                    print(f"[INFO] [_load_ext] Found method: {name}")
-                    bound_method = (
-                        lambda self_inst=self, func=member: lambda *a, **kw: func(
-                            self_inst, *a, **kw
+                if callable(member):
+                    if static_methods and name in static_methods:
+                        setattr(EmbeddedCore, name, staticmethod(member))
+                        print(f"[INFO] [_load_ext] Registered static method: {name}")
+                    else:
+                        bound_method = (
+                            lambda self_inst=self, func=member: lambda *a, **kw: func(
+                                self_inst, *a, **kw
+                            )
                         )
-                    )
-                    setattr(self, name, bound_method())
-                    print(f"[INFO] [_load_ext] Bound method: {name}")
+                        setattr(self, name, bound_method())
+                        print(f"[INFO] [_load_ext] Registered method: {name}")
 
         except OSError as e:
             print(f"[ERROR] [_load_ext] Err opening/reading {fname}: {e}")
@@ -277,32 +291,37 @@ class EmbeddedCore:
         self._base_property_topic = f"{base}/properties"
 
         def on_message(topic, payload):
+            if topic is None or payload is None:
+                print("[WARN] Null MQTT topic or payload received.")
+                return
+
             topic = topic.decode("utf-8")
             if not topic.startswith(f"{self._base_action_topic}/"):
                 return
 
-            topic = topic[len(f"{self._base_action_topic}/") :]
-
-            namespace, action_name = topic.split("/", 1)
+            action_name = topic[len(f"{self._base_action_topic}/") :]
             action_input = None
             if payload != b"":
                 try:
                     action_input = json.loads(payload)
                 except Exception as e:
-                    print("Error in _on_message:", e)
+                    print("[ERROR] json loads failed:", e)
                     return
 
             action = self._actions.get(action_name)
-            if action:
-                asyncio.create_task(action(action_input))
-            else:
-                print(f"[ERROR] Action '{action_name}' not found.")
+            try:
+                if action:
+                    asyncio.create_task(action(self, action_input))
+                else:
+                    print(f"[ERROR] Action '{action_name}' not found.")
+            except Exception as e:
+                print(f"[ERROR] Error executing action '{action_name}': {e}")
 
         self._mqtt.set_callback(on_message)
 
         if self._otau:
-            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=2)
-            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=2)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=1)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=1)
             self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/finish", qos=1)
         else:
             self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/init", qos=1)
@@ -325,24 +344,24 @@ class EmbeddedCore:
         self._reset()
 
     def _wrap_vfs_action(action_func):
-        def builtin_action_wrapper(self, action_input):
+        async def wrapper(action_input):
             base = gmtime(0)[0]
-            action_result = action_func(self, action_input)
-            ts = time()
-            epoch_ts = (
-                {"time_base": base, "timestamp": ts}
-                if base != 1970
-                else {"timestamp": ts}
-            )
-            action_result.update({"epoch_timestamp": epoch_ts})
+            output = {
+                "result": await action_func(action_input),
+                "timestamp": (
+                    {"epoch_year": base, "seconds": time()}
+                    if base != 1970
+                    else {"seconds": time()}
+                ),
+            }
             self._publish(
                 f"{self._base_event_topic}/core/otau/report",
-                json.dumps(action_result),
+                json.dumps(output),
                 retain=False,
                 qos=1,
             )
 
-        return builtin_action_wrapper
+        return wrapper
 
     @_wrap_vfs_action
     async def _vfs_write(self, action_input):
@@ -350,22 +369,19 @@ class EmbeddedCore:
         try:
             file_path = action_input["path"].strip("/")
             payload = action_input["payload"]
-            data = payload["data"]
-            data_hash = int(payload["hash"], 16)
-            algo = payload["algo"]
-            append = action_input.get("append", False)
 
+            algo = payload["algo"]
             if algo != "crc32":
                 raise NotImplementedError("Only CRC32 is supported.")
 
-            if crc32(data) != data_hash:
+            data = payload["data"]
+            expected_hash = int(payload["hash"], 16)
+            if crc32(data) != expected_hash:
                 raise ValueError("CRC32 mismatch")
 
-            mode = "a" if append else "w"
+            mode = "a" if action_input.get("append") else "w"
             parts = file_path.split("/")
             dir_parts, file_name = parts[:-1], parts[-1]
-
-            # Validate path (flat relative only)
             if ".." in dir_parts or file_path.startswith("/"):
                 raise ValueError("Unsafe file path")
 
@@ -378,7 +394,7 @@ class EmbeddedCore:
                 f.write(a2b_base64(data))
 
             os.chdir("/")  # Reset to root for safety
-            result.update({"written": file_path})
+            result["written"] = file_path
 
         except Exception as e:
             result.update({"error": True, "message": str(e)})
