@@ -50,10 +50,10 @@ def main(setup=None):
     async def main_task():
         topic = f"{core._base_property_topic}/core/status"
         if otau_mode:
-            core._publish(topic, "ADAPT", True, 1)
+            core._publish(topic, "OTAU", True, 1)
         else:
             setup(core)
-            core._publish(topic, "OK", True, 1)
+            core._publish(topic, "APP", True, 1)
 
         while True:
             start_time = ticks_ms()
@@ -346,7 +346,7 @@ class EmbeddedCore:
 
     @_wrap_vfs_action
     async def _vfs_write(self, action_input):
-        result = {"action": "write", "error": False, "message": ""}
+        result = {}
         try:
             file_path = action_input["path"].strip("/")
             payload = action_input["payload"]
@@ -378,19 +378,16 @@ class EmbeddedCore:
                 f.write(a2b_base64(data))
 
             os.chdir("/")  # Reset to root for safety
-            result["message"] = file_path
+            result.update({"written": file_path})
 
         except Exception as e:
-            result["error"] = True
-            result["message"] = str(e)
+            result.update({"error": True, "message": str(e)})
 
         return result
 
     @_wrap_vfs_action
     async def _vfs_delete(self, action_input):
-        raise NotImplementedError(
-            "Subclasses must implement builtin_action_vfs_delete()"
-        )
+        return {"error": True, "message": "Not implemented"}
 
     def _reset(self):
         if self._mqtt_ready:
