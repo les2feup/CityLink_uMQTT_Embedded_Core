@@ -12,10 +12,10 @@ class EmbeddedCoreExt:
             try:
                 await task_func(self)
             except asyncio.CancelledError:
-                print("Task cancelled:", task_id)
+                print("[INFO] Task cancelled:", task_id)
                 return True
             except Exception as e:
-                print("Task failed:", task_id, "with error:", e)
+                print("[WARN] Task failed:", task_id, "with error:", e)
                 return True
 
             return False
@@ -36,10 +36,8 @@ class EmbeddedCoreExt:
 
         if period_ms == 0:
             asyncio.create_task(try_wrapper())  # One shot task
-            print("[DEBUG] Created one-shot task:", task_id)
         else:
             self._tasks[task_id] = asyncio.create_task(task_wrapper())
-            print("[DEBUG] Created periodic task:", task_id, "with period:", period_ms, "ms")
 
     def task_cancel(self, task_id):
         if task_id not in self._tasks:

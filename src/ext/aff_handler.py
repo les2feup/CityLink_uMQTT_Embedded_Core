@@ -6,9 +6,12 @@ import asyncio
 class EmbeddedCoreExt:
     __static__ = ["sync_executor", "async_executor"]
 
-    def create_property(self, property_name, initial_value, default_setter=True, **_):
+    def create_property(self, property_name, initial_value, pub_only=True, **_):
         if property_name in self._properties:
             return
+
+        if not pub_only:
+            self._assign_default_setter(property_name)
 
         self._properties[property_name] = initial_value
 
@@ -64,7 +67,6 @@ class EmbeddedCoreExt:
 
         # TODO: sanitize action names
         self._actions[f"app/{action_name}"] = action_func
-
         self._mqtt.subscribe(f"{self._base_action_topic}/app/{action_name}", qos=qos)
 
     def sync_executor(func):
@@ -77,29 +79,12 @@ class EmbeddedCoreExt:
         async def wrapper(self, *args, **kwargs):
             return await func(self, *args, **kwargs)
 
-    # async def _builtin_action_set_property(self, action_input):
-    #     """
-    #     Set the value of a property.
-    #
-    #     Args:
-    #         action_input: Dictionary containing property name and value
-    #
-    #     Raises:
-    #         ValueError: If property is read-only or input is malformed
-    #
-    #     Interface: AffordanceHandler
-    #     """
-    #     property_name = action_input.get("pname")
-    #     property_value = action_input.get("pval")
-    #     if property_name is None or property_value is None:
-    #         # self.log(
-    #         #     "Malformed set_property action input. Input template: {'pname': 'name_string', 'pval': Any}",
-    #         #     LogLevels.ERROR,
-    #         # )
-    #         return
-    #
-    #     if property_name in self._net_ro_props:
-    #         # self.log(f"Property {property_name} is read-only.", LogLevels.WARN)
-    #         return
-    #
-    #     self.set_property(property_name, property_value)
+    def _assign_default_setter(self, property_name):
+        async def default_set_action(self, action_input):
+            self.set_property(property_name, action_input)
+
+        self.register_action_executor(
+            f"set/{property_name}",
+            default_set_action,
+            qos=0,
+        )

@@ -26,15 +26,6 @@
         }
     ],
     "properties": {
-        "priorityValue": {
-            "type": "string",
-            "description": "The priority level of the sensor reading.",
-            "enum": [
-                "low",
-                "medium",
-                "high"
-            ]
-        },
         "priority": {
             "type": "string",
             "description": "The priority level of the sensor reading.",
@@ -50,7 +41,7 @@
             "forms": [
                 {
                     "href": "{{CITYLINK_HREF}}",
-                    "mqv:filter": "{{CITYLINK_PROPERTY}}/priority",
+                    "mqv:filter": "{{CITYLINK_APP_PROPERTY}}/priority",
                     "op": [
                         "readproperty",
                         "observeproperty",
@@ -58,6 +49,16 @@
                     ],
                     "mqv:qos": 0,
                     "mqv:retain": true,
+                    "contentType": "application/json"
+                },
+                {
+                    "href": "{{CITYLINK_HREF}}",
+                    "mqv:filter": "{{CITYLINK_APP_ACTION}}/set/priority",
+                    "op": [
+                        "writeproperty"
+                    ],
+                    "mqv:qos": 0,
+                    "mqv:retain": false,
                     "contentType": "application/json"
                 }
             ]
@@ -89,7 +90,7 @@
             "forms": [
                 {
                     "href": "{{CITYLINK_HREF}}",
-                    "mqv:filter": "{{CITYLINK_EVENT}}/sensor_value/{priority}_prio",
+                    "mqv:filter": "{{CITYLINK_APP_EVENT}}/sensor_value/{priority}_prio",
                     "op": [
                         "subscribeevent",
                         "unsubscribeevent"

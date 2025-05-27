@@ -9,16 +9,14 @@ from time import ticks_ms, ticks_diff, sleep_ms, gmtime, time
 
 
 def _with_exponential_backoff(func, retries, base_timeout_ms):
+    print(
+        f"[INFO] Trying {func.__name__}: {retries} retries. {base_timeout_ms} ms base timeout."
+    )
     for i in range(retries):
         retry_timeout = base_timeout_ms * (2**i)
-        # TODO: suppress this print when building for production
-        print(f"[INFO] Trying {func.__name__} (attempt {i + 1}/{retries})")
         try:
             return func()
         except Exception as e:
-            print(
-                f"[ERROR] {func.__name__} failed: {e}, retrying in {retry_timeout} milliseconds"
-            )
             sleep_ms(retry_timeout)
 
     raise Exception(f"[ERROR] {func.__name__} failed after {retries} retries")
@@ -29,12 +27,10 @@ def main():
     otau_mode = False
     try:
         open(OTAU_FILE, "r").close()
-        print("[MAIN] OTA Update mode detected.")
+        print("[MAIN] OTAU flag detected. Entering adaptation mode.")
         otau_mode = True
     except Exception:
-        if otau_mode:
-            print("[MAIN] No setup provided, forcing OTA Update mode.")
-        print("[MAIN] No OTA Update mode detected.")
+        pass
 
     core = EmbeddedCore(otau_mode)
 
@@ -53,16 +49,16 @@ def main():
             raise Exception("Forcing OTA Update mode") from e
 
     async def main_task():
-        print("[INFO] Async loop started.")
-
         core._setup_mqtt()
 
         topic = f"{core._base_property_topic}/core/status"
         if otau_mode:
             core._publish(topic, "OTAU", True, 1)
+            print("[INFO] Core in adaptation mode. Waiting for OTAU actions.")
         else:
             run_setup(core)
             core._publish(topic, "APP", True, 1)
+            print("[INFO] Setup finished. Core in APP mode.")
 
         while True:
             start_time = ticks_ms()
@@ -119,7 +115,6 @@ class EmbeddedCore:
                 if callable(member):
                     if static_methods and name in static_methods:
                         setattr(EmbeddedCore, name, staticmethod(member))
-                        print(f"[INFO] [_load_ext] Registered static method: {name}")
                     else:
                         bound_method = (
                             lambda self_inst=self, func=member: lambda *a, **kw: func(
@@ -127,7 +122,6 @@ class EmbeddedCore:
                             )
                         )
                         setattr(self, name, bound_method())
-                        print(f"[INFO] [_load_ext] Registered method: {name}")
 
         except OSError as e:
             print(f"[ERROR] [_load_ext] Err opening/reading {fname}: {e}")
@@ -209,7 +203,6 @@ class EmbeddedCore:
         self._mqtt.check_msg()
 
         if ticks_diff(ticks_ms(), self.last_publish_time) >= PING_TIMEOUT_MS:
-            print("[DEBUG] Pinging MQTT broker...")
             self._mqtt.ping()
             self.last_publish_time = ticks_ms()
 
@@ -241,14 +234,13 @@ class EmbeddedCore:
 
             elif reg_status == "success":
                 reg_id = payload.get("id", None)
-                print("[INFO] Registration success received from broker.")
 
                 if reg_id is not None:
                     self._id = reg_id
                     self._update_config({"id": self._id})
-                    print("[INFO] Updated device ID in configuration: ", self._id)
 
                 registered = True
+                print("[INFO] Registration successful.")
 
             elif reg_status == "error":
                 print(
@@ -264,7 +256,7 @@ class EmbeddedCore:
         self._mqtt.set_callback(on_registration)
         self._mqtt.subscribe(f"citylink/{self._id}/registration/ack", qos=1)
 
-        print("[DEBUG] Waiting for registration ack...")
+        print("[INFO] Initiating registration process.")
         time_passed = 0
         registration_payload = json.dumps(self._config["reg"])
         while not registered:
@@ -329,7 +321,7 @@ class EmbeddedCore:
             self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/init", qos=1)
 
         self._mqtt_ready = True
-        print("[INFO] Subscribed to action topics. MQTT ready.")
+        print("[INFO] MQTT setup complete.")
 
     async def _otau_init(self, *_):
         if self._otau:

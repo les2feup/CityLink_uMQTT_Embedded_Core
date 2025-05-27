@@ -34,5 +34,7 @@ def setup(citylink: EmbeddedCore):
     simulation task to generate sensor values. Valid priority values include
     "low", "medium", and "high".
     """
-    citylink.create_property("priority", "low")  # "low", "medium", "high"
+    citylink.create_property(
+        "priority", "low", pub_only=False
+    )  # "low", "medium", "high"
     citylink.task_create("sensor_sim", simulate_random_sensor, 1000)
