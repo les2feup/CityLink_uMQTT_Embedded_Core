@@ -36,13 +36,7 @@
             ]
         },
         "priority": {
-            "type": "string",
-            "description": "The priority level of the sensor reading.",
-            "enum": [
-                "low",
-                "medium",
-                "high"
-            ],
+            "tm:ref": "#/properties/priorityValue",
             "default": "low",
             "readOnly": true,
             "writeOnly": false,
@@ -77,13 +71,7 @@
             "readOnly": true,
             "uriVariables": {
                 "priority": {
-                    "type": "string",
-                    "description": "The priority level of the sensor reading.",
-                    "enum": [
-                        "low",
-                        "medium",
-                        "high"
-                    ]
+                    "tm:ref": "#/properties/priorityValue"
                 }
             },
             "forms": [
@@ -109,13 +97,7 @@
                         "const": "priority"
                     },
                     "pval": {
-                        "type": "string",
-                        "description": "The priority level of the sensor reading.",
-                        "enum": [
-                            "low",
-                            "medium",
-                            "high"
-                        ]
+                        "tm:ref": "#/properties/priorityValue"
                     }
                 }
             }
