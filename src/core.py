@@ -397,7 +397,19 @@ class EmbeddedCore:
 
     @_wrap_vfs_action
     async def _vfs_delete(self, action_input):
-        return {"error": True, "message": "Not implemented"}
+        path = action_input.get("path", "").strip("/")
+        recursive = action_input.get("recursive", False)
+        if recursive:
+            return {"error": True, "message": "Recursive delete not implemented"}
+
+        if not path or path == "": 
+            return {"error": True, "message": "Path not specified"}
+
+        try:
+            os.remove(path)
+            return {"deleted": [path]}
+        except OSError as e:
+            return {"error": True, "message": str(e)}
 
     def _reset(self):
         if self._mqtt_ready:
