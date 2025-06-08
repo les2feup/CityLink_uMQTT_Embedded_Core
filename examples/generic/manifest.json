@@ -1,20 +1,10 @@
 {
-    "download": [
+    "source": [
         {
             "filename": "main.py",
             "url": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/generic/priority.py",
-            "contentType": "text",
+            "contentType": "text/x-python",
             "sha256": "51bb090bf95a1cbfdf4dc8b0d1db5c6865b060f712af523bba2e78227f427674"
         }
-    ],
-    "wot": {
-        "tm": {
-            "title": "Generic Sensor with Priority-based Events",
-            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/generic/priority.tm.json",
-            "version": {
-                "instance": "0.1.0",
-                "model": "0.1.0"
-            }
-        }
-    }
+    ]
 }

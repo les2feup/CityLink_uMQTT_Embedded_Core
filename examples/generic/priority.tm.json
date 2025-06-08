@@ -1,6 +1,9 @@
 {
     "@context": "https://www.w3.org/2022/wot/td/v1.1",
-    "@type": "tm:ThingModel",
+    "@type": [
+        "tm:ThingModel",
+        "citylink:AppTM"
+    ],
     "title": "PrioritySensor",
     "description": "A simple sensor that publishes readings on different topics based on a priority level.",
     "version": {
@@ -8,9 +11,9 @@
     },
     "links": [
         {
-            "rel": "describes",
-            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/generic/priority.py",
-            "type": "text/x-python"
+            "rel": "citylink:manifest",
+            "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/generic/manifest.json",
+            "type": "application/json"
         },
         {
             "rel": "tm:submodel",

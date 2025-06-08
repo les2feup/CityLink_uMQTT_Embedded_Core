@@ -1,6 +1,9 @@
 {
     "@context": "https://www.w3.org/2022/wot/td/v1.1",
-    "@type": "tm:ThingModel",
+    "@type": [
+        "tm:ThingModel",
+        "citylink:AppTM"
+    ],
     "title": "Simple Temperature Sensor",
     "description": "A simple temperature sensor that monitors the temperature and triggers an alarm if it exceeds a certain threshold. ETFA 2025 example.",
     "version": {
@@ -25,6 +28,16 @@
             "instanceName": "citylink:embeddedCore"
         }
     ],
+    "citylink:manifest": {
+        "source": [
+            {
+                "filename": "main.py",
+                "url": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/EmbeddedCore/ports/micropython/examples/etfa2025/temperature.py",
+                "contentType": "text/x-python",
+                "sha256": "6c9bb55f6d209b37e1eb4df0db690c3300dde9e421369bc0604a9499a3b58c3f"
+            }
+        ]
+    },
     "properties": {
         "temperature": {
             "forms": [
