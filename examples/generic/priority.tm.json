@@ -22,7 +22,7 @@
             "instanceName": "citylink:platform"
         },
         {
-            "rel": "tm:extends",
+            "rel": "tm:submodel",
             "href": "https://raw.githubusercontent.com/les2feup/CityLink/refs/heads/main/ThingModels/embeddedCore/mqtt_micropython_core.tm.json",
             "type": "application/tm+json",
             "instanceName": "citylink:embeddedCore"
@@ -103,26 +103,6 @@
                     "contentType": "application/json"
                 }
             ]
-        }
-    },
-    "actions": {
-        "setProperty": {
-            "input": {
-                "properties": {
-                    "pname": {
-                        "const": "priority"
-                    },
-                    "pval": {
-                        "type": "string",
-                        "description": "The priority level of the sensor reading.",
-                        "enum": [
-                            "low",
-                            "medium",
-                            "high"
-                        ]
-                    }
-                }
-            }
         }
     }
 }
