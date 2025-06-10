@@ -1,11 +1,22 @@
 import os
 import json
 import asyncio
-from .const import *
 from machine import unique_id
 from umqtt.simple import MQTTClient
 from binascii import crc32, a2b_base64, hexlify
 from time import ticks_ms, ticks_diff, sleep_ms, gmtime, time
+from micropython import const
+
+
+PING_TIMEOUT_MS = const(60000)
+REGISTRATION_PUBLISH_INTERVAL_MS = const(10000)  # 10 seconds
+POLLING_INTERVAL_MS = const(500)  # 0.5 seconds
+
+DEFAULT_MQTT_PORT = const(1883)
+DEFAULT_MQTT_KEEPALIVE = const(120)
+DEFAULT_MQTT_CLEAN_SESSION = const(True)
+
+OTAU_FILE = const("/otau.flag")
 
 
 def _with_exponential_backoff(func, retries, base_timeout_ms):
@@ -34,21 +45,27 @@ def main():
 
     core = EmbeddedCore(otau_mode)
 
-    core._init()
     core._connect()
     core._edge_con_register()
 
-    def run_setup(core):
+    def load_app(core):
+        nonlocal otau_mode
         try:
             from main import setup
 
             setup(core)
         except Exception as e:
-            print(f"[FATAL] Failed to run user setup function: {e}")
-            open(OTAU_FILE, "x").close()
-            raise Exception("Forcing OTA Update mode") from e
+            print(f"[ERROR] Failed to run user setup function: {e}")
+            if not otau_mode:
+                open(OTAU_FILE, "x").close()
+            print("[INFO] Entering adaptation mode due to setup failure.")
+            otau_mode = True
 
     async def main_task():
+        nonlocal otau_mode
+
+        core._otau = otau_mode
+        core._setup_op_mode()
         core._setup_mqtt()
 
         topic = f"{core._base_property_topic}/core/status"
@@ -56,9 +73,9 @@ def main():
             core._publish(topic, "OTAU", True, 1)
             print("[INFO] Core in adaptation mode. Waiting for OTAU actions.")
         else:
-            run_setup(core)
+            load_app(core)
             core._publish(topic, "APP", True, 1)
-            print("[INFO] Setup finished. Core in APP mode.")
+            print("[INFO] Application setup finished. Core in APP mode.")
 
         while True:
             start_time = ticks_ms()
@@ -70,13 +87,13 @@ def main():
 
 
 class EmbeddedCore:
-    def __init__(self, otau):
+    def __init__(self):
         self._tasks = {}
         self._actions = {}
         self._properties = {}
         self._config = {}
 
-        self._otau = otau
+        self._otau = false
         self._mqtt_ready = False
         self.last_publish_time = 0
 
@@ -128,7 +145,7 @@ class EmbeddedCore:
         except Exception as e:
             print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
 
-    def _init(self):
+    def _setup_op_mode(self):
         if self._otau:
             self._actions = {
                 "core/otau/write": self._vfs_write,
@@ -402,7 +419,7 @@ class EmbeddedCore:
         if recursive:
             return {"error": True, "message": "Recursive delete not implemented"}
 
-        if not path or path == "": 
+        if not path or path == "":
             return {"error": True, "message": "Path not specified"}
 
         try:
