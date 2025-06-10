@@ -16,6 +16,7 @@ DEFAULT_MQTT_PORT = const(1883)
 DEFAULT_MQTT_KEEPALIVE = const(120)
 DEFAULT_MQTT_CLEAN_SESSION = const(True)
 
+OTAU_FLAG = const("otau.flag")
 OTAU_FILE = const("/otau.flag")
 
 
@@ -35,13 +36,15 @@ def _with_exponential_backoff(func, retries, base_timeout_ms):
 
 def main():
     print("[MAIN] Starting main function...")
-    otau_mode = False
-    try:
-        open(OTAU_FILE, "r").close()
-        print("[MAIN] OTAU flag detected. Entering adaptation mode.")
+
+    files = os.listdir()
+    main_exists = "main.py" in files or "main.mpy" in files
+    otau_mode = OTAU_FLAG in files or OTAU_FILE in files
+    if not otau_mode and not main_exists:
+        open(OTAU_FILE, "x").close()
         otau_mode = True
-    except Exception:
-        pass
+
+    print(f"[MAIN] OTAU mode: {otau_mode}")
 
     core = EmbeddedCore(otau_mode)
 
@@ -49,33 +52,32 @@ def main():
     core._edge_con_register()
 
     def load_app(core):
-        nonlocal otau_mode
+        if core._otau:
+            print("[INFO] Core in adaptation mode, skipping application load.")
+            return
+
         try:
             from main import setup
 
             setup(core)
         except Exception as e:
             print(f"[ERROR] Failed to run user setup function: {e}")
-            if not otau_mode:
-                open(OTAU_FILE, "x").close()
-            print("[INFO] Entering adaptation mode due to setup failure.")
-            otau_mode = True
+            # File should never exists at this point, but if it does, and open throws 
+            # it achieves the same effect as the forced exception below.
+            # There is some loss of information if it does, but it is not critical.
+            open(OTAU_FILE, "x").close()
+            raise Exception("[ERROR] Setup failed, forcing reset into adaptation mode.") from e
 
     async def main_task():
-        nonlocal otau_mode
 
-        core._otau = otau_mode
         core._setup_op_mode()
         core._setup_mqtt()
 
+        load_app(core)
+
         topic = f"{core._base_property_topic}/core/status"
-        if otau_mode:
-            core._publish(topic, "OTAU", True, 1)
-            print("[INFO] Core in adaptation mode. Waiting for OTAU actions.")
-        else:
-            load_app(core)
-            core._publish(topic, "APP", True, 1)
-            print("[INFO] Application setup finished. Core in APP mode.")
+        core._publish(topic, "OTAU" if otau_mode else "APP", True, 1)
+        print(f"[INFO] core._publish: {topic} -> {'OTAU' if otau_mode else 'APP'}")
 
         while True:
             start_time = ticks_ms()
@@ -87,13 +89,13 @@ def main():
 
 
 class EmbeddedCore:
-    def __init__(self):
+    def __init__(self, otau_mode=False):
         self._tasks = {}
         self._actions = {}
         self._properties = {}
         self._config = {}
 
-        self._otau = false
+        self._otau = otau_mode
         self._mqtt_ready = False
         self.last_publish_time = 0
 
