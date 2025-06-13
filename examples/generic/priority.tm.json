@@ -11,7 +11,7 @@
     },
     "links": [
         {
-            "rel": "citylink:manifest",
+            "rel": "citylink:manifestLink",
             "href": "https://raw.githubusercontent.com/les2feup/CityLink_uMQTT_Embedded_Core/refs/heads/master/examples/generic/manifest.json",
             "type": "application/json"
         },
