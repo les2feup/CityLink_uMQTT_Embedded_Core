@@ -7,7 +7,7 @@
         "tm:ThingModel",
         "citylink:AppTM"
     ],
-    "title": "PrioritySensor",
+    "title": "Priority Sensor",
     "description": "A simple sensor that publishes readings on different topics based on a priority level.",
     "version": {
         "model": "0.1.0"
@@ -41,7 +41,7 @@
                 "high"
             ],
             "default": "low",
-            "readOnly": true,
+            "readOnly": false,
             "writeOnly": false,
             "observable": true,
             "forms": [
@@ -97,6 +97,17 @@
                 {
                     "href": "{{CITYLINK_HREF}}",
                     "mqv:filter": "{{CITYLINK_APP_EVENT}}/sensor_value/{priority}_prio",
+                    "op": [
+                        "subscribeevent",
+                        "unsubscribeevent"
+                    ],
+                    "mqv:qos": 0,
+                    "mqv:retain": false,
+                    "contentType": "application/json"
+                },
+                {
+                    "href": "{{CITYLINK_HREF}}",
+                    "mqv:filter": "{{CITYLINK_APP_EVENT}}/sensor_value/+",
                     "op": [
                         "subscribeevent",
                         "unsubscribeevent"
