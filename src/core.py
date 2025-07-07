@@ -354,7 +354,7 @@ class EmbeddedCore:
         if not new_tm_url:
             raise ValueError("New TM URL must be provided for adaptation mode.")
 
-        self._update_config({"reg": {"tm": new_tm_url}})
+        self._update_config({"tm_new": {new_tm_url}})
 
         open(ADAPT_FILE, "x").close()
         self._reset()
@@ -372,6 +372,7 @@ class EmbeddedCore:
                             final_f.write(append_data)
                 else:
                     os.rename(temp_path, final_path)
+
                 print(f"[INFO] Committed write: {final_path}")
             except OSError as e:
                 print(f"[ERROR] Failed to commit write for {final_path}: {e}")
@@ -390,6 +391,7 @@ class EmbeddedCore:
                 print(f"[ERROR] Failed to commit delete for {path}: {e}")
 
     def _abort_changes(self):
+        self._update_config({"tm_new": None})
         self._pendings_deletes.clear()
         if not self._pendings_writes:
             return
@@ -406,9 +408,14 @@ class EmbeddedCore:
             return
 
         if commit:
+            print("[INFO] Committing changes...")
+            self._update_config(
+                {"reg": {"tm": self._config.get("tm_new")}, "tm_new": None}
+            )
             self._commit_pending_deletes()
             self._commit_pending_writes()
         else:
+            print("[INFO] Aborting changes...")
             self._abort_changes()
 
         os.remove(ADAPT_FILE)
@@ -462,21 +469,19 @@ class EmbeddedCore:
 
             mode = "a" if action_input.get("append") else "w"
             if mode == "a" and file_name not in os.listdir():
-                raise FileNotFoundError(
-                    f"File {file_name} does not exist for appending."
-                )
-            if mode == "w" and file_name in os.listdir():
-                raise FileExistsError(f"File {file_name} already exists for writing.")
+                raise OSError(f"File {file_name} does not exist for appending.")
 
             temp_name = f"{mode}:tmp_{file_name}"
-            temp_path = f"{file_path}/{temp_name}"
+            temp_path = f"{file_path}/{temp_name}" if dir_parts else temp_name
             self._pendings_writes[file_path] = temp_path
 
-            with open(temp_path, mode) as f:
+            print(f"[INFO] Writing to temporary file: {temp_path}")
+            with open(temp_name, mode) as f:
                 f.write(a2b_base64(data))
 
             os.chdir("/")  # Reset to root for safety
             result["written"] = file_path
+            print(f"[INFO] Write operation completed: {file_path}")
 
         except Exception as e:
             result.update({"error": True, "message": str(e)})
