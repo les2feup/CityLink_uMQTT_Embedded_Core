@@ -16,8 +16,8 @@ DEFAULT_MQTT_PORT = const(1883)
 DEFAULT_MQTT_KEEPALIVE = const(120)
 DEFAULT_MQTT_CLEAN_SESSION = const(True)
 
-OTAU_FLAG = const("otau.flag")
-OTAU_FILE = const("/otau.flag")
+ADAPT_FLAG = const("adapt.flag")
+ADAPT_FILE = const("/adapt.flag")
 
 
 def _with_exponential_backoff(func, retries, base_timeout_ms):
@@ -39,20 +39,20 @@ def main():
 
     files = os.listdir()
     main_exists = "main.py" in files or "main.mpy" in files
-    otau_mode = OTAU_FLAG in files or OTAU_FILE in files
-    if not otau_mode and not main_exists:
-        open(OTAU_FILE, "x").close()
-        otau_mode = True
+    adapt_mode = ADAPT_FLAG in files or ADAPT_FILE in files
+    if not adapt_mode and not main_exists:
+        open(ADAPT_FILE, "x").close()
+        adapt_mode = True
 
-    print(f"[MAIN] OTAU mode: {otau_mode}")
+    print(f"[MAIN] ADAPT mode: {adapt_mode}")
 
-    core = EmbeddedCore(otau_mode)
+    core = EmbeddedCore(adapt_mode)
 
     core._connect()
     core._edge_con_register()
 
     def load_app(core):
-        if core._otau:
+        if core._adapt:
             print("[INFO] Core in adaptation mode, skipping application load.")
             return
 
@@ -62,11 +62,13 @@ def main():
             setup(core)
         except Exception as e:
             print(f"[ERROR] Failed to run user setup function: {e}")
-            # File should never exists at this point, but if it does, and open throws 
+            # File should never exists at this point, but if it does, and open throws
             # it achieves the same effect as the forced exception below.
             # There is some loss of information if it does, but it is not critical.
-            open(OTAU_FILE, "x").close()
-            raise Exception("[ERROR] Setup failed, forcing reset into adaptation mode.") from e
+            open(ADAPT_FILE, "x").close()
+            raise Exception(
+                "[ERROR] Setup failed, forcing reset into adaptation mode."
+            ) from e
 
     async def main_task():
 
@@ -76,8 +78,8 @@ def main():
         load_app(core)
 
         topic = f"{core._base_property_topic}/core/status"
-        core._publish(topic, "OTAU" if otau_mode else "APP", True, 1)
-        print(f"[INFO] core._publish: {topic} -> {'OTAU' if otau_mode else 'APP'}")
+        core._publish(topic, "ADAPT" if adapt_mode else "APP", True, 1)
+        print(f"[INFO] core._publish: {topic} -> {'ADAPT' if adapt_mode else 'APP'}")
 
         while True:
             start_time = ticks_ms()
@@ -89,13 +91,13 @@ def main():
 
 
 class EmbeddedCore:
-    def __init__(self, otau_mode=False):
+    def __init__(self, adapt_mode=False):
         self._tasks = {}
         self._actions = {}
         self._properties = {}
         self._config = {}
 
-        self._otau = otau_mode
+        self._adapt = adapt_mode
         self._mqtt_ready = False
         self.last_publish_time = 0
 
@@ -148,15 +150,18 @@ class EmbeddedCore:
             print(f"[ERROR] [_load_ext] Unexp. Err during: {e}")
 
     def _setup_op_mode(self):
-        if self._otau:
+        if self._adapt:
             self._actions = {
-                "core/otau/write": self._vfs_write,
-                "core/otau/delete": self._vfs_delete,
-                "core/otau/finish": self._otau_finish,
+                "core/adapt/write": self._vfs_write,
+                "core/adapt/delete": self._vfs_delete,
+                "core/adapt/finish": self._adapt_finish,
             }
+
+            self._pendings_writes = {}  # final_path: tmp:path
+            self._pendings_deletes = []  # [path_to_delete]
         else:
             self._actions = {
-                "core/otau/init": self._otau_init,
+                "core/adapt/init": self._adapt_init,
             }
             try:
                 for fname in os.listdir("/citylink/ext"):
@@ -332,28 +337,81 @@ class EmbeddedCore:
 
         self._mqtt.set_callback(on_message)
 
-        if self._otau:
-            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/write", qos=1)
-            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/delete", qos=1)
-            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/finish", qos=1)
+        if self._adapt:
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/adapt/write", qos=1)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/adapt/delete", qos=1)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/adapt/finish", qos=1)
         else:
-            self._mqtt.subscribe(f"{self._base_action_topic}/core/otau/init", qos=1)
+            self._mqtt.subscribe(f"{self._base_action_topic}/core/adapt/init", qos=1)
 
         self._mqtt_ready = True
         print("[INFO] MQTT setup complete.")
 
-    async def _otau_init(self, *_):
-        if self._otau:
+    async def _adapt_init(self, new_tm_url):
+        if self._adapt:
             return
 
-        open(OTAU_FILE, "x").close()
+        if not new_tm_url:
+            raise ValueError("New TM URL must be provided for adaptation mode.")
+
+        self._update_config({"reg": {"tm": new_tm_url}})
+
+        open(ADAPT_FILE, "x").close()
         self._reset()
 
-    async def _otau_finish(self, *_):
-        if not self._otau:
+    def _commit_pending_writes(self):
+        if not self._pendings_writes:
             return
 
-        os.remove(OTAU_FILE)
+        for final_path, temp_path in self._pendings_writes.items():
+            try:
+                if temp_path.startswith("a:"):
+                    with open(temp_path, "r") as f:
+                        append_data = f.read()
+                        with open(final_path, "a") as final_f:
+                            final_f.write(append_data)
+                else:
+                    os.rename(temp_path, final_path)
+                print(f"[INFO] Committed write: {final_path}")
+            except OSError as e:
+                print(f"[ERROR] Failed to commit write for {final_path}: {e}")
+
+        self._pendings_writes.clear()
+
+    def _commit_pending_deletes(self):
+        if not self._pendings_deletes:
+            return
+
+        for path in self._pendings_deletes:
+            try:
+                os.remove(path)
+                print(f"[INFO] Committed delete: {path}")
+            except OSError as e:
+                print(f"[ERROR] Failed to commit delete for {path}: {e}")
+
+    def _abort_changes(self):
+        self._pendings_deletes.clear()
+        if not self._pendings_writes:
+            return
+
+        for _, temp_path in self._pendings_writes.items():
+            try:
+                os.remove(temp_path)
+                print(f"[INFO] Discarded back write: {temp_path}")
+            except OSError as e:
+                print(f"[ERROR] Failed to discard write for {temp_path}: {e}")
+
+    async def _adapt_finish(self, commit):
+        if not self._adapt:
+            return
+
+        if commit:
+            self._commit_pending_deletes()
+            self._commit_pending_writes()
+        else:
+            self._abort_changes()
+
+        os.remove(ADAPT_FILE)
         self._reset()
 
     def _wrap_vfs_action(action_func):
@@ -368,7 +426,7 @@ class EmbeddedCore:
                 ),
             }
             self._publish(
-                f"{self._base_event_topic}/core/otau/report",
+                f"{self._base_event_topic}/core/adapt/report",
                 json.dumps(output),
                 retain=False,
                 qos=1,
@@ -392,7 +450,6 @@ class EmbeddedCore:
             if crc32(data) != expected_hash:
                 raise ValueError("CRC32 mismatch")
 
-            mode = "a" if action_input.get("append") else "w"
             parts = file_path.split("/")
             dir_parts, file_name = parts[:-1], parts[-1]
             if ".." in dir_parts or file_path.startswith("/"):
@@ -403,7 +460,19 @@ class EmbeddedCore:
                     os.mkdir(part)
                 os.chdir(part)
 
-            with open(file_name, mode) as f:
+            mode = "a" if action_input.get("append") else "w"
+            if mode == "a" and file_name not in os.listdir():
+                raise FileNotFoundError(
+                    f"File {file_name} does not exist for appending."
+                )
+            if mode == "w" and file_name in os.listdir():
+                raise FileExistsError(f"File {file_name} already exists for writing.")
+
+            temp_name = f"{mode}:tmp_{file_name}"
+            temp_path = f"{file_path}/{temp_name}"
+            self._pendings_writes[file_path] = temp_path
+
+            with open(temp_path, mode) as f:
                 f.write(a2b_base64(data))
 
             os.chdir("/")  # Reset to root for safety
@@ -425,8 +494,9 @@ class EmbeddedCore:
             return {"error": True, "message": "Path not specified"}
 
         try:
-            os.remove(path)
-            return {"deleted": [path]}
+            with open(path, "r") as f:  # Check if the file exists
+                self._pendings_deletes.append(path)
+                return {"deleted": [path]}
         except OSError as e:
             return {"error": True, "message": str(e)}
 
